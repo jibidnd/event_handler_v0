@@ -1,3 +1,6 @@
+# Credential files
+*.auth
+
 # Node artifact files
 node_modules/
 dist/
