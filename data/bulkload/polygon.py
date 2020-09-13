@@ -505,7 +505,7 @@ def get_polygon_schema(endpoint_name):
                 'exchange_id': pa.int16(),
                 'size': pa.int64(),
                 'conditions': pa.list_(value_type = pa.int8(), list_size = -1),
-                'price': pa.float32(),
+                'price': pa.decimal128(),
                 'tape': pa.int8()
             })
         ,
@@ -518,10 +518,10 @@ def get_polygon_schema(endpoint_name):
                 'sequence_number': pa.int64(),
                 'conditions': pa.list_(value_type = pa.int8(), list_size = -1),
                 'tape': pa.int8() ,
-                'bid': pa.float32(),
+                'bid': pa.decimal128(),
                 'bid_size': pa.int64(),
                 'bid_exchange_id': pa.int16(),
-                'ask': pa.float32(),
+                'ask': pa.decimal128(),
                 'ask_size': pa.int64(),
                 'ask_exchange_id': pa.int16()
         })
@@ -530,13 +530,13 @@ def get_polygon_schema(endpoint_name):
             pa.schema({
                 'ticker': pa.string(),
                 'timestamp': pa.int64(),
-                'open': pa.float32(),
-                'high': pa.float32(),
-                'low': pa.float32(),
-                'close': pa.float32(),
+                'open': pa.decimal128(),
+                'high': pa.decimal128(),
+                'low': pa.decimal128(),
+                'close': pa.decimal128(),
                 'volume': pa.int64(),
                 'n_items': pa.int64(),
-                'vwap': pa.float32()
+                'vwap': pa.decimal128()
         })
     }
 
