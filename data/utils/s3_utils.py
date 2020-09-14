@@ -1,8 +1,39 @@
-import boto3
+'''
+A custom class to write data from a queue to S3.
+
+Classes:
+    s3_writer(q_to_write)
+
+Functions:
+    snowflake_writer.snowflake_connection -> SnowflakeConnection
+    snowflake_writer.listen_and_write(q_to_write) -> None
+    snowflake_writer.write(self,
+                body,
+                table_name: str,
+                database: str = None,
+                schema: str = None,
+                parallel: int = 4,
+                unique_on = ['TICKER', 'TIMESTAMP'],
+                if_duplicate = 'overwrite'
+    ) -> None
+    write_to_snowflake(q_to_write) -> None
+
+Example:
+
+    # Listen and write from a queue
+    listen_and_write_to_snowflake(q_to_write)
+
+    # Writing a single load (`body`)
+    writer = snowflake_writer()
+    writer.write(body, table_name, database, schema)
+'''
+
 import os
+from queue import Empty
+
+import boto3
 import pyarrow as pa
 from pyarrow import parquet as pq
-from queue import Empty
 
 class s3_writer(object):
 
@@ -10,6 +41,8 @@ class s3_writer(object):
         '''
         Takes items from `q_to_write` from a multiprocess.JoinableQueue
         and writes them to S3.
+
+        If not run on an AWS instance, 
 
         :param multiprocessing.JoinableQueue q_to_write: Each item from the queue
             should be a dictionary containing the following information:

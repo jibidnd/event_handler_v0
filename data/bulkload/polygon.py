@@ -1,26 +1,59 @@
+'''
+Use multiprocessing and asyncio to bulkload data from Polygon.io.
+
+Functions:
+
+    async historic_v2(endpoint, session, request_params, loop = False, attempts = 3) -> list
+    async historic_v2_batch(lst_endpoints, request_params, sort_key = 't', loop = False, **kwargs) -> list
+    load_historic_v2_batch(q_to_request, q_to_write) -> None
+    load_historic_v2_batches(lst_tickers, request_params, writer, writer_params, data_params = {})
+    get_first_available_bar(ticker) -> datetime.datetime
+    make_requests_yyyymm(ticker, data_type = 'bar', start = None, end = None, multiplier = 1,
+                            timespan = 'minute', unadjusted = True) -> list
+    make_requests_ticker(ticker, start = datetime.datetime(2000, 1, 1), end = None, multiplier = 1,
+                            timespan = 'day', unadjusted = True) -> list
+    get_polygon_names(endpoint_name) -> dict
+    get_polygon_schema(endpoint_name) -> dict
+    to_pa_tbl(lst_dicts, endpoint_name, additional_data = {}) -> pyarrow.Table
+
+Example:
+
+    load_historic_v2_batches(
+        lst_tickers = ['AAPL', 'TSLA'],
+        request_params = {'apiKey': 'some_api_key'},
+        writer = snowflake_utils.listen_and_write_to_snowflake,
+        writer_params = {'snowflake_database': 'TESTDB', 'snowflake_schema': 'PUBLIC','snowflake_table': 'OHLCV_MIN_TEST'},
+        data_params = {'start': datetime.datetime(2020, 9, 1), 'data_type': 'bar'}
+    )
+
+'''
+
 import sys
 import os
+import io
+import psutil
+import logging
+
+import itertools
+import copy
+import math
+import decimal
+import re
+import json
+import configparser
 import datetime
 import time
-import configparser
-import logging
-import io
-import re
-import itertools
-import math
-import psutil
-import traceback
-import copy
+
 import multiprocessing as mp
+from multiprocessing_logging import install_mp_handler
 from queue import Empty
-import multiprocessing_logging
-import json
+import requests
+import asyncio
 
 import pyarrow as pa
 from pyarrow import parquet as pq
-import requests
+
 import aiohttp
-import asyncio
 import boto3
 
 from ..utils import utils
@@ -28,23 +61,13 @@ from ..utils import utils
 #============================================================================================
 # Global Vars
 #============================================================================================
-# Read in config
-# config = configparser.ConfigParser()
-# config.read_file(open('./creds.auth'))
-# apiKey = config.get('PolygonIO', 'api_key')
-
 # host url
 url = 'https://api.polygon.io'
-
-apiKey = None
-def set_APIKey(key):
-    global apiKey
-    apiKey = key
 
 #============================================================================================
 # async Functions
 #============================================================================================
-
+# make requests from API asynchronously
 async def historic_v2(endpoint, session, request_params, loop = False, attempts = 3) -> list:
     """
     Async function to request all data for one `endpoint` with the given `request_params`.
@@ -56,9 +79,13 @@ async def historic_v2(endpoint, session, request_params, loop = False, attempts 
     :param bool loop: If True, attempts to fetch multiple pages of results from `endpoint`
         using the "timestamp" field in the results for offset. Default False.
     :params int attempts: Number of attempts for retry if receiving a non-404 error. Default 3.
-    """
 
-    # dummy initial timestamp of the endpoint
+    NOTE: the received json parses all floats as decimal.Decimal
+    """
+    # Get root logger
+    _logger = logging.getLogger()
+
+    # dummy initial timestamp of the endpoint for looping
     next_t = 0
     #list to store the results (1 dict per record in results)
     lst_results = []
@@ -73,30 +100,27 @@ async def historic_v2(endpoint, session, request_params, loop = False, attempts 
             async with await session.get(endpoint, params = request_params) as resp:
                 # Get the URL used
                 resp_url = resp.url.human_repr()
-                print(resp_url)
-                resp_json = await resp.json(content_type = None)    # disable content type check
+                _logger.debug(resp_url)
+                resp_json = await resp.json(content_type = None, loads = lambda s: json.loads(s, parse_float = decimal.Decimal))    # disable content type check
         except json.decoder.JSONDecodeError:
-            # TODO: log error
-            break
+            raise
         except Exception as exc:
-            # TODO: log exception
-            # Wait 1 second before retrying
-            # TODO: log retrying attempt
+            _logger.info(exc)
             attempt += 1
             await asyncio.sleep(0.1)
-            break
         # Handle the response
         else:
             # regular case: get `results` field from response
             if resp.status == 200:
                 results = resp_json['results']
-                # TODO: log number of records returned
 
                 # If there are no more results, we've reached the end
                 if resp_json.get('results_count') == 0 or resp_json.get('resultsCount') == 0:
+                    _logger.debug(f'0 records returned from {resp_url}')
                     break
                 # Oherwise append to `lst_results` and set `next_t` as last timestamp + 1 nanosecond
                 else:
+                    _logger.debug(f'{len(results)} records returned from {resp_url}')
                     lst_results.extend(results)
                     next_t = results[-1]['t'] + 1
                 # Quit if looping is not needed
@@ -105,12 +129,11 @@ async def historic_v2(endpoint, session, request_params, loop = False, attempts 
             
             # 404 error
             elif resp.status == 404:
-                # no data, not a trading day
-                # TODO: log no results returned
+                _logger.debug('No records returned from {resp_url}')
                 break
             # other errors: increment attempt by 1 and try again
             else:
-                # TODO: log retrying attempt
+                _logger.debug(f'Unexpected error. Reattempting with {attempts - attempt} left.')
                 attempt += 1
                 await asyncio.sleep(0.1)
     return lst_results
@@ -132,14 +155,12 @@ async def historic_v2_batch(lst_endpoints, request_params, sort_key = 't', loop 
     # change the limit on simultaneously open connections. Default 100
     timeout = aiohttp.ClientTimeout(total = 60)
     async with aiohttp.ClientSession(timeout = timeout) as session:
-        # TODO: logging
         tasks = [
                     historic_v2(endpoint, session = session, request_params = request_params, loop = loop)
                     for endpoint in lst_endpoints
                 ]
         # this will return a list of lists: each child list consists of all results from 1 endpoint in *lst_endpoints*
         shallow_lst_results = await asyncio.gather(*tasks)
-
     # flatten the list
     lst_results = list(itertools.chain.from_iterable(shallow_lst_results))
     # Sort the list by sort_key:
@@ -171,7 +192,6 @@ def load_historic_v2_batch(q_to_request, q_to_write) -> None:
         except Empty:
             return
         else:
-            # TODO: First check memory usage??
             # Run historic_v2_batch and gather results
             rows = asyncio.run(historic_v2_batch(**job))
             # Convert to pyarrow table
@@ -181,12 +201,12 @@ def load_historic_v2_batch(q_to_request, q_to_write) -> None:
                 q_to_write.put({'body': pa_tbl, **job})
             q_to_request.task_done()
 
-        # return
-##
+    return
 
-def load_historic_v2_batches(lst_tickers, request_params, writer, writer_params, data_params = {}):
+def load_historic_v2_batches(lst_tickers, request_params, writer, writer_params, data_params = {}, logger_level = logging.INFO):
 
     """
+    Main use case of this module.
     Takes a list of tickers, request the data from polygon using multiprocessing, and sends the writer a queue containing the results as pyarrow tables.
     
     :param list lst_tickers: The list of tickers for which data is wanted.
@@ -221,25 +241,34 @@ def load_historic_v2_batches(lst_tickers, request_params, writer, writer_params,
             - yyyymm if applicable
     :param dict writer_params: Any parameters to pass to the writer.
         For s3, this should contain s3_bucket.
+    :param int logger_level: logging level. Default logging.INFO
     """
+
+    # Logging
+    _logger = logging.getLogger()
+    _logger.setLevel(logger_level)
+    formatter = logging.Formatter('%(asctime)s|%(name)s|%(levelname)s - %(message)s', '%Y-%m-%d %H:%M:%S')
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(formatter)
+    _logger.addHandler(handler)
 
     # Default data parameters: insert where key is not specified
     data_params = {**{'data_type': 'bar', 'start': None, 'end': None, 'multiplier': 1, 'timespan': 'minute', 'unadjusted': 'true', 'sort': 'asc'}, **data_params}
     # All outstanding requests to take care of
     manager = mp.Manager()
+    # Use joinable queue so we know when the tasks are completed
     q_to_request = manager.JoinableQueue()
     q_to_write = manager.JoinableQueue()
 
     # Generate requests
     if data_params['data_type'] == 'bar':
         # Do one ticker at a time
-        endpoint_name = 'historic_bars_v2'
+        endpoint_name = 'historic_agg_v2'
         if data_params['timespan'] in ['hour', 'day', 'week', 'month', 'quarter', 'year']:
             for ticker in lst_tickers:
                 # This will be a list of a list of length 1
                 lst_lst_endpoints = make_requests_ticker(ticker, data_params['start'], data_params['end'],
                                                                 data_params['multiplier'], data_params['timespan'], data_params['unadjusted'])
-                
                 # s3 information for if writer is to write to s3
                 s3_key = f'price_data/bars/{data_params["timespan"]}/tkr={ticker}/data.parquet'
                 writer_params.update({'s3_key': s3_key})
@@ -314,8 +343,23 @@ def load_historic_v2_batches(lst_tickers, request_params, writer, writer_params,
                 }
                 q_to_request.put(copy.deepcopy(kwargs))    # Note that dictionaries are mutable
 
-    num_processes_requests = math.floor(mp.cpu_count() / 2)
-    num_processes_write = math.floor(mp.cpu_count() / 2)
+    # "pre-allocate" memory for data. These are the flat file sizes for 1 month of data, very conservatively.
+    mem_req = None
+    if data_params['data_type'] == 'bar':
+        mem_req = 10 * 10**6    # 1MB
+    elif data_params['data_type'] == 'tick':
+        mem_req = 50 * 10 **6   # 50 MB
+    elif data_params['data_type'] == 'quote':
+        mem_req = 200 * 10**6   # 200 MB
+    
+    num_processes = math.floor(max(min(psutil.virtual_memory().available / mem_req, psutil.cpu_count()), 2))
+    num_processes_requests = math.ceil(num_processes / 2)
+    num_processes_write = num_processes - num_processes_requests
+
+    # Instantiate multiprocessing logger
+    # Converts the root logger's handlers to `MultiProcessingHandler`s
+    install_mp_handler()
+    _logger.info(f'Spinning up {num_processes} processes: {num_processes_requests} for requests and {num_processes_write} for writing.')
     with mp.Pool(num_processes_requests + num_processes_write) as pool:
         # logger = mp.log_to_stderr(logging.ERROR)
         for _ in range(num_processes_requests):
@@ -326,17 +370,19 @@ def load_historic_v2_batches(lst_tickers, request_params, writer, writer_params,
             res.get()
         pool.close()
         pool.join()
-        # q_to_request.join()
-        # q_to_write.join()
+    return
 
 #============================================================================================
 # Request helpers
 #============================================================================================
+# Functions that help create the requests to Polygon.io
 
 def get_first_available_bar(ticker) -> datetime.datetime:
     '''
-    Returns first date with available data for ticker.
-    Returns datetime.datetime instance.
+    Returns first date with available data for ticker as a datetime.datetime instance.
+    Requests a bar of the ticker beginning 2000-01-01 and gets the time of the first available bar.
+
+    :param str ticker: The ticker to request.
     '''
     endpoint = '/v2/aggs/ticker/{}/range/1/day/2000-01-01/{}'.format(
         ticker, datetime.datetime.now().strftime('%Y-%m-%d'))
@@ -351,7 +397,7 @@ def make_requests_yyyymm(ticker, data_type = 'bar', start = None, end = None, mu
                             timespan = 'minute', unadjusted = True) -> list:
     '''
     Create the list of endpoints to request bars from for `ticker`.
-    Returns a list of lists, with each sublist constituting a month's worth of dates.
+    Returns a list of lists, with each sublist consisting a month's worth of urls.
 
     :param str ticker: ticker to request data for.
     :param str data_type: data type to request. Acceptable values are:
@@ -378,7 +424,7 @@ def make_requests_yyyymm(ticker, data_type = 'bar', start = None, end = None, mu
     Returns list of lists:
         [['2019-01-01', ..., '2019-01-31'], ['2019-02-01', ..., '2019-02-28'], ..., ['2019-12-01', ..., '2019-12-31']]
     '''
-
+    # Define the period to request data for
     start = start or get_first_available_bar(ticker)
     if not start:
         return
@@ -391,7 +437,7 @@ def make_requests_yyyymm(ticker, data_type = 'bar', start = None, end = None, mu
     # Generate list of lists:
     # datess = [['2019-01-01', ..., '2019-01-31'], ['2019-02-01', ..., '2019-02-28'], ..., ['2019-12-01', ..., '2019-12-31']]
     datess = [utils.generate_days(first, (first + datetime.timedelta(days = 45)).replace(day = 1) - datetime.timedelta(days = 1), 1) for first in date_bin_edges]
-    # Type of request to generate:
+    # Return generated endpoints based on the type of request to generate:
     if data_type == 'bar':
         lst_lst_endpoints = [[url + f'/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{date.strftime("%Y-%m-%d")}/{date.strftime("%Y-%m-%d")}' for date in dates] for dates in datess]
     elif data_type == 'tick':
@@ -421,7 +467,7 @@ def make_requests_ticker(ticker, start = datetime.datetime(2000, 1, 1), end = No
         - year
     :param bool unadjusted: Polygon request parameter; set to true if the results should NOT be adjusted for splits.
         Default True
-    Returns a list of a list of length 1:
+    Returns a list of a list of length 1. This is to match the output format of make_requests_yyyymm.
         [[ticker 0 request]]
     '''
     start = start or datetime.datetime(2000, 1, 1)
@@ -434,11 +480,19 @@ def make_requests_ticker(ticker, start = datetime.datetime(2000, 1, 1), end = No
 #============================================================================================
 # Other helper functions
 #============================================================================================
-def get_polygon_names(endpoint_name):
+# These are data-formatting helpers that are Polygon.io specific.
+
+def get_polygon_names(endpoint_name) -> dict:
     '''
     Provides the mapping as defined by Polygon.io
     from returned results key and the field names
 
+    :param str endpoint_name: The endpoint name whose schema is desired.
+        Acceptable values are:
+        - historic_trades_v2
+        - historic_quotes_v2
+        - historic_agg_v2
+    
     Note: Polygon.io results (the field in the response) don't actually have the key "T"
     '''
     dict_mappings = {
@@ -472,7 +526,7 @@ def get_polygon_names(endpoint_name):
             'X': 'ask_exchange_id'
         }
         ,
-        'historic_bars_v2': {	\
+        'historic_agg_v2': {	\
             # 'T': 'ticker',
             't': 'timestamp',
             'o': 'open',
@@ -487,10 +541,16 @@ def get_polygon_names(endpoint_name):
 
     return dict_mappings[endpoint_name]
 
-def get_polygon_schema(endpoint_name):
+def get_polygon_schema(endpoint_name) -> dict:
     '''
     Provides the schema by type of data.
     Using a hard-coded schema for stability
+
+    :param str endpoint_name: The endpoint name whose schema is desired.
+        Acceptable values are:
+        - historic_trades_v2
+        - historic_quotes_v2
+        - historic_agg_v2
     '''
     # Define schema
     dict_schemas = {
@@ -505,7 +565,7 @@ def get_polygon_schema(endpoint_name):
                 'exchange_id': pa.int16(),
                 'size': pa.int64(),
                 'conditions': pa.list_(value_type = pa.int8(), list_size = -1),
-                'price': pa.decimal128(),
+                'price': pa.decimal128(34, 6),
                 'tape': pa.int8()
             })
         ,
@@ -518,31 +578,31 @@ def get_polygon_schema(endpoint_name):
                 'sequence_number': pa.int64(),
                 'conditions': pa.list_(value_type = pa.int8(), list_size = -1),
                 'tape': pa.int8() ,
-                'bid': pa.decimal128(),
+                'bid': pa.decimal128(34, 6),
                 'bid_size': pa.int64(),
                 'bid_exchange_id': pa.int16(),
-                'ask': pa.decimal128(),
+                'ask': pa.decimal128(34, 6),
                 'ask_size': pa.int64(),
                 'ask_exchange_id': pa.int16()
         })
         ,
-        'historic_bars_v2': \
+        'historic_agg_v2': \
             pa.schema({
                 'ticker': pa.string(),
                 'timestamp': pa.int64(),
-                'open': pa.decimal128(),
-                'high': pa.decimal128(),
-                'low': pa.decimal128(),
-                'close': pa.decimal128(),
+                'open': pa.decimal128(34, 6),
+                'high': pa.decimal128(34, 6),
+                'low': pa.decimal128(34, 6),
+                'close': pa.decimal128(34, 6),
                 'volume': pa.int64(),
                 'n_items': pa.int64(),
-                'vwap': pa.decimal128()
+                'vwap': pa.decimal128(34, 6)
         })
     }
 
     return dict_schemas[endpoint_name]
 
-def to_pa_tbl(lst_dicts, endpoint_name, additional_data = {}):
+def to_pa_tbl(lst_dicts, endpoint_name, additional_data = {}) -> pa.Table:
     """
     Convert list of rows (as dictionaries) to a pyarrow table using Polygon specific schema and names.
 
@@ -568,33 +628,3 @@ def to_pa_tbl(lst_dicts, endpoint_name, additional_data = {}):
 
     return pa_tbl
 
-def pq_to_s3(pa_tbl, s3_client, s3_bucket, s3_key, pq_params = {}):
-
-    # Default params
-    params = {'version': '2.0', 'use_dictionary': True, 'flavor': 'spark',
-                'compression': 'snappy', 'use_deprecated_int96_timestamps': True,
-                'allow_truncated_timestamps': True}
-    params.update(pq_params)
-
-    # Write parquet file to bytes stream
-    writer = pa.BufferOutputStream()
-    pq.write_table(pa_tbl,
-                   writer,
-                   **pq_params
-                  )
-    body = bytes(writer.getvalue())
-    s3_client.put_object(Body = body, Bucket = s3_bucket, Key = s3_key)
-
-# make a per process s3_client
-s3_client = None
-def initialize():
-  global s3_client
-  session = boto3.Session(profile_name='aws_credentials')
-  s3_client = session.client('s3')
-
-# bulk fetch: async, list of endpoints (1)
-
-# bulk load to s3 (2)
-# bulk load to snowflake (3)
-
-# bulk fetch: multiprocessing, list of (2) or (3)

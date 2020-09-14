@@ -1,13 +1,45 @@
+'''
+A custom class to write data from a queue to snowflake, with options to handle overwrites.
+
+Classes:
+    snowflake_writer(q_to_write, config_path)
+
+Functions:
+    snowflake_writer.snowflake_connection -> SnowflakeConnection
+    snowflake_writer.listen_and_write(q_to_write) -> None
+    snowflake_writer.write(self,
+                body,
+                table_name: str,
+                database: str = None,
+                schema: str = None,
+                parallel: int = 4,
+                unique_on = ['TICKER', 'TIMESTAMP'],
+                if_duplicate = 'overwrite'
+    ) -> None
+    write_to_snowflake(q_to_write) -> None
+
+Example:
+
+    # Listen and write from a queue
+    listen_and_write_to_snowflake(q_to_write)
+
+    # Writing a single load (`body`)
+    writer = snowflake_writer()
+    writer.write(body, table_name, database, schema)
+'''
+
 import os
-import pyarrow as pa
-from pyarrow import parquet as pq
-from queue import Empty
-import configparser
-import snowflake.connector
-from snowflake.connector import ProgrammingError
-from tempfile import TemporaryDirectory
 import random
 import string
+from queue import Empty
+import configparser
+from tempfile import TemporaryDirectory
+import logging
+
+import pyarrow as pa
+from pyarrow import parquet as pq
+import snowflake.connector
+from snowflake.connector import ProgrammingError
 import pandas as pd
 
 class snowflake_writer(object):
@@ -35,6 +67,7 @@ class snowflake_writer(object):
             'allow_truncated_timestamps': True
             }
         self.conn = self.snowflake_connection()
+        self._logger = logging.getLogger()
 
     def snowflake_connection(self):
         '''
@@ -76,6 +109,7 @@ class snowflake_writer(object):
                 table_name = job['writer_params']['snowflake_table']
                 body = job['body']
                 self.write(body, table_name, database, schema)
+                q_to_write.task_done()
         return
 
     def write(self,
@@ -109,6 +143,8 @@ class snowflake_writer(object):
                     ('"' + table_name + '"'))
 
         cursor = self.conn.cursor()
+        # We will be using the same database for the whole session
+        cursor.execute(f'USE DATABASE {database}')
         stage_name = None # Forward declaration
 
         # Create stage
@@ -116,11 +152,11 @@ class snowflake_writer(object):
             try:
                 stage_name = ''.join(random.choice(string.ascii_lowercase) for _ in range(5))
                 # use database
-                cursor.execute(f'USE DATABASE {database}')
+                # cursor.execute(f'USE DATABASE {database}')
                 # Create temporary stage with format
                 create_stage_sql = ('create temporary stage /* Python:data.utils.snowflake_utils.snowflake_writer */'
                                     f'"{stage_name}" FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY)')
-                print(f'creating stage with "{create_stage_sql}"')
+                self._logger.info(f'Creating stage: \n    {create_stage_sql}"')
                 cursor.execute(create_stage_sql, _is_internal = True).fetchall()
                 break
             except ProgrammingError as pe:
@@ -153,7 +189,7 @@ class snowflake_writer(object):
                                 stage_name = stage_name,
                                 parallel = parallel
                                 )
-            print(f'Uploading files with "{upload_sql}"')
+            self._logger.info(f'Uploading files: \n    {upload_sql}')
             cursor.execute(upload_sql, _is_internal = True)
             # remove temporary file
             os.remove(path)
@@ -169,7 +205,7 @@ class snowflake_writer(object):
         copy_into_sql = (f'COPY INTO {tmp_location} /* Python:data.utils.snowflake_utils.snowflake_writer */'
                         f'FROM @"{stage_name}" FILE_FORMAT=(TYPE=PARQUET COMPRESSION=SNAPPY)'
                         f'MATCH_BY_COLUMN_NAME=CASE_INSENSITIVE  PURGE=TRUE ON_ERROR=abort_statement')
-        print(copy_into_sql)
+        self._logger.info(f'Copying into temporary table: \n    {copy_into_sql}')
         cursor.execute(copy_into_sql)
 
         # Upsert into target table by doing a delete-insert combo (overwrite)
@@ -178,27 +214,29 @@ class snowflake_writer(object):
         # since one first has to execute a command to get the column names, generate the sql statement, then do the merge
         join_condition = ' and '.join([f'tgt.{key} = src.{key}' for key in unique_on])
         if if_duplicate == 'overwrite':
+            self._logger.info('Overwriting rows from target table (tgt) on {join_condition}')
             cursor.execute(f'DELETE FROM {location} tgt USING {tmp_location} src WHERE {join_condition}')
         elif if_duplicate == 'cancel':
+            self._logger.info('Ignoring rows from source table (src) where {join_condition}')
             cursor.execute(f'DELETE FROM {tmp_location} src USING {location} tgt WHERE {join_condition}')
         elif if_duplicate == 'append':
             pass
         
         # Copy rows into target table
         insert_sql = f'INSERT INTO {location} ({",".join(colnames)}) SELECT {",".join(colnames)} FROM {tmp_location}'
-        print(insert_sql)
+        self._logger.info(f'Inserting into target table: \n    {insert_sql}')
         copy_results = cursor.execute(insert_sql).fetchall()
         cursor.close()
 
         return copy_results
 
 
-def write_to_snowflake(q_to_write):
+def listen_and_write_to_snowflake(q_to_write):
     writer = snowflake_writer(q_to_write)
     writer.listen_and_write()
     return
 
 
 
-    # load_historic_v2_batches(['AAPL'], {'apiKey': 'AKTHU99DLS5LLD2TWFLP'}, data.utils.snowflake_utils.write_to_snowflake, {'database': 'testdb', 'schema': 'PUBLIC'}, {'start': datetime.datetime(2020,
+    # load_historic_v2_batches(['AAPL'], {'apiKey': 'AKTHU99DLS5LLD2TWFLP'}, data.utils.snowflake_utils.listen_and_write_to_snowflake, {'database': 'testdb', 'schema': 'PUBLIC'}, {'start': datetime.datetime(2020,
     # ...:  9, 1), 'data_type': 'bar'}) 
