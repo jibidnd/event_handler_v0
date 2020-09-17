@@ -42,7 +42,7 @@ import snowflake.connector
 from snowflake.connector import ProgrammingError
 import pandas as pd
 
-class snowflake_writer(object):
+class SnowflakeWriter(object):
 
     def __init__(self, q_to_write = None, config_path = None):
         '''
@@ -232,7 +232,7 @@ class snowflake_writer(object):
 
 
 def listen_and_write_to_snowflake(q_to_write):
-    writer = snowflake_writer(q_to_write)
+    writer = SnowflakeWriter(q_to_write)
     writer.listen_and_write()
     return
 

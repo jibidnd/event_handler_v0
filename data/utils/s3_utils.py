@@ -35,7 +35,7 @@ import boto3
 import pyarrow as pa
 from pyarrow import parquet as pq
 
-class s3_writer(object):
+class S3Writer(object):
 
     def __init__(self, q_to_write):
         '''
@@ -122,6 +122,6 @@ class s3_writer(object):
         return   
 
 def write_to_s3(q_to_write):
-    writer = s3_writer(q_to_write)
+    writer = S3Writer(q_to_write)
     writer.listen_and_write()
     return
