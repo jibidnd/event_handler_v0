@@ -93,7 +93,7 @@ class SnowflakeWriter(object):
         Items from the queue should be dictionaries containing at least:
             - s3_bucket: str
             - key: str
-            - body: pyarrow table or string
+            - body: pyarrow table, pandas dataframe, or string
         '''
         q_to_write = q_to_write or self.q_to_write
 
@@ -108,7 +108,10 @@ class SnowflakeWriter(object):
                 schema = job['writer_params']['snowflake_schema']
                 table_name = job['writer_params']['snowflake_table']
                 body = job['body']
-                self.write(body, table_name, database, schema)
+                if isinstance(body, str):
+                    pass
+                elif isinstance(body, (pa.table, pd.DataFrame)):
+                    self.write_table(body, table_name, database, schema)    # use default arguments
                 q_to_write.task_done()
         return
 
@@ -146,6 +149,10 @@ class SnowflakeWriter(object):
         # We will be using the same database for the whole session
         cursor.execute(f'USE DATABASE {database}')
         stage_name = None # Forward declaration
+
+        if isinstance(body, str):
+            insert_sql = f'INSERT INTO {location} VALUES (?)'
+            cursor.executes
 
         # Create stage
         while True:
@@ -212,15 +219,16 @@ class SnowflakeWriter(object):
         # The MERGE command requires specifying all columns, 
         # and it is not clear if there are significant performance gains (if any),
         # since one first has to execute a command to get the column names, generate the sql statement, then do the merge
-        join_condition = ' and '.join([f'tgt.{key} = src.{key}' for key in unique_on])
-        if if_duplicate == 'overwrite':
-            self._logger.info('Overwriting rows from target table (tgt) on {join_condition}')
-            cursor.execute(f'DELETE FROM {location} tgt USING {tmp_location} src WHERE {join_condition}')
-        elif if_duplicate == 'cancel':
-            self._logger.info('Ignoring rows from source table (src) where {join_condition}')
-            cursor.execute(f'DELETE FROM {tmp_location} src USING {location} tgt WHERE {join_condition}')
-        elif if_duplicate == 'append':
-            pass
+        if unique_on:
+            join_condition = ' and '.join([f'tgt.{key} = src.{key}' for key in unique_on])
+            if if_duplicate == 'overwrite':
+                self._logger.info('Overwriting rows from target table (tgt) on {join_condition}')
+                cursor.execute(f'DELETE FROM {location} tgt USING {tmp_location} src WHERE {join_condition}')
+            elif if_duplicate == 'cancel':
+                self._logger.info('Ignoring rows from source table (src) where {join_condition}')
+                cursor.execute(f'DELETE FROM {tmp_location} src USING {location} tgt WHERE {join_condition}')
+            elif if_duplicate == 'append':
+                pass
         
         # Copy rows into target table
         insert_sql = f'INSERT INTO {location} ({",".join(colnames)}) SELECT {",".join(colnames)} FROM {tmp_location}'
@@ -229,14 +237,10 @@ class SnowflakeWriter(object):
         cursor.close()
 
         return copy_results
+       
 
-
-def listen_and_write_to_snowflake(q_to_write):
+def listen_and_write_table_to_snowflake(q_to_write):
     writer = SnowflakeWriter(q_to_write)
-    writer.listen_and_write()
+    writer.listen_and_write_table()
     return
 
-
-
-    # load_historic_v2_batches(['AAPL'], {'apiKey': 'AKTHU99DLS5LLD2TWFLP'}, data.utils.snowflake_utils.listen_and_write_to_snowflake, {'database': 'testdb', 'schema': 'PUBLIC'}, {'start': datetime.datetime(2020,
-    # ...:  9, 1), 'data_type': 'bar'}) 

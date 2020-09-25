@@ -1,6 +1,9 @@
 # Credential files
 *.auth
 
+# Scratch work
+scratchwork/
+
 # Node artifact files
 node_modules/
 dist/

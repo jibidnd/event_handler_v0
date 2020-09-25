@@ -1,5 +1,5 @@
 '''
-backtrader.snowflake
+Snowflake feed for historical data only
 '''
 
 import datetime
@@ -8,7 +8,7 @@ import backtrader
 from backtrader import date2num
 import snowflake.connector
 
-class SnowflakeData(backtrader.feeds.DataBase):
+class SnowflakeData(backtrader.feed.DataBase):
     params = (
         ('account', None),
         ('user', None),

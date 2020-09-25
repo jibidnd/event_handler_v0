@@ -4,3 +4,6 @@ boto3>=1.14.10
 multiprocessing_logging>=0.3.1
 pyarrow>=1.0.1
 snowflake-connector-python
+alpaca-backtrader-api
+trading_calendars>=1.11.11
+kafka-python>=2.0.1

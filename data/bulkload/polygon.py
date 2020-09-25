@@ -21,7 +21,7 @@ Example:
     load_historic_v2_batches(
         lst_tickers = ['AAPL', 'TSLA'],
         request_params = {'apiKey': 'some_api_key'},
-        writer = snowflake_utils.listen_and_write_to_snowflake,
+        writer = snowflake_utils.listen_and_write_table_to_snowflake,
         writer_params = {'snowflake_database': 'TESTDB', 'snowflake_schema': 'PUBLIC','snowflake_table': 'OHLCV_MIN_TEST'},
         data_params = {'start': datetime.datetime(2020, 9, 1), 'data_type': 'bar'}
     )
@@ -56,7 +56,7 @@ from pyarrow import parquet as pq
 import aiohttp
 import boto3
 
-from ..utils import utils
+from ..utils import util_functions
 
 #============================================================================================
 # Global Vars
@@ -436,7 +436,7 @@ def make_requests_yyyymm(ticker, data_type = 'bar', start = None, end = None, mu
         date_bin_edges.append((date_bin_edges[-1] + datetime.timedelta(days = 45)).replace(day = 1))
     # Generate list of lists:
     # datess = [['2019-01-01', ..., '2019-01-31'], ['2019-02-01', ..., '2019-02-28'], ..., ['2019-12-01', ..., '2019-12-31']]
-    datess = [utils.generate_days(first, (first + datetime.timedelta(days = 45)).replace(day = 1) - datetime.timedelta(days = 1), 1) for first in date_bin_edges]
+    datess = [util_functions.generate_days(first, (first + datetime.timedelta(days = 45)).replace(day = 1) - datetime.timedelta(days = 1), 1) for first in date_bin_edges]
     # Return generated endpoints based on the type of request to generate:
     if data_type == 'bar':
         lst_lst_endpoints = [[url + f'/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{date.strftime("%Y-%m-%d")}/{date.strftime("%Y-%m-%d")}' for date in dates] for dates in datess]
@@ -614,7 +614,7 @@ def to_pa_tbl(lst_dicts, endpoint_name, additional_data = {}) -> pa.Table:
     pa_schema = get_polygon_schema(endpoint_name)
 
     # Convert list of rows to columnar format
-    columnar = utils.to_columnar(lst_dicts, data_keys)
+    columnar = util_functions.to_columnar(lst_dicts, data_keys)
     # Add ticker name (field is unpopulated)
     columnar['ticker'] = [additional_data['ticker']] * len(list(columnar.values())[0])
     # rename column names in columnar
