@@ -87,7 +87,7 @@ class SnowflakeWriter(object):
         )
         return conn
 
-    def listen_and_write(self, q_to_write = None):
+    def listen_and_write_table(self, q_to_write = None):
         '''
         Fetches from a queue and writes the contents to s3.
         Items from the queue should be dictionaries containing at least:

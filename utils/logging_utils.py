@@ -10,6 +10,7 @@ import traceback
 import importlib
 
 from . import snowflake_utils
+from . import util_functions
 
 
 def jsonify_log_record(record) -> str:
@@ -26,7 +27,7 @@ def jsonify_log_record(record) -> str:
         'msecs', 'message', 'msg', 'name', 'pathname', 'process',
         'processName', 'relativeCreated', 'stack_info', 'thread', 'threadName')
 
-    message_dict = {}
+    message_dict = dict()
 
     # Format the log message
     if isinstance(record.msg, dict):
@@ -38,7 +39,7 @@ def jsonify_log_record(record) -> str:
     
     # Load the LogRecord Attributes
     formatter = logging.Formatter()
-    message_dict = {record.__dict__.get(attr) for attr in RESERVED_ATTRS}
+    message_dict = {attr: record.__dict__.get(attr) for attr in RESERVED_ATTRS}
     # Format exception info
     if message_dict.get('exc_info'):
         message_dict['exc_info'] = formatter.formatException(message_dict.get(exc_info))
@@ -54,25 +55,29 @@ def jsonify_log_record(record) -> str:
     return json.dumps(message_dict, sort_keys = True)
 
 
-class SnowflakeLogger(logging.Handler):
+class SnowflakeHandler(logging.Handler):
     '''
     Writes log message to snowflake.
     '''
     def __init__(self, log_location = None):
+        super().__init__()
+        self.log_location = log_location
+
         if not isinstance(log_location, str):
             raise Exception('Please indicate table to log to.')
-        
+
         # Connect to snowflake
         self.writer = snowflake_utils.SnowflakeWriter()
-        self.cursor = self.writer.cursor()
+        self.cursor = self.writer.conn.cursor()
+        
         
         # Create table to log to if it doesn't already exist
-        create_sql = (f"CREATE TABLE IF NOT EXISTS {log_location} ("
-                        f"log_message VARIANT"
-                        f"CREATED_AT_UTC TIMESTAMP_NTZ(9) DEFAULT CONVERT_TIMEZONE('America/Los_Angeles', 'UTC', CAST(CURRENT_TIMESTAMP() AS TIMESTAMP_NTZ(9)))"
+        create_sql = (f"CREATE TABLE IF NOT EXISTS {self.log_location} ( "
+                        f"LOG_ENTRY VARIANT, "
+                        f"CREATED_AT_UTC TIMESTAMP_NTZ(9) DEFAULT CONVERT_TIMEZONE('America/Los_Angeles', 'UTC', CAST(CURRENT_TIMESTAMP() AS TIMESTAMP_NTZ(9))) "
                         ")")
         self.cursor.execute(create_sql)
     
     def emit(self, record):      
-        insert_sql = (f" INSERT INTO {self.log_location} (log_message) SELECT TRY_PARSE_JSON({jsonify_log_record(record)})")
+        insert_sql = (f"INSERT INTO {self.log_location} (LOG_ENTRY) SELECT TRY_PARSE_JSON('{jsonify_log_record(record)}')")
         self.cursor.execute(insert_sql)

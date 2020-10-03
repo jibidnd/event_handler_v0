@@ -56,7 +56,7 @@ from pyarrow import parquet as pq
 import aiohttp
 import boto3
 
-from ..utils import util_functions
+from ...utils import logging_utils, snowflake_utils, util_functions
 
 #============================================================================================
 # Global Vars
@@ -83,7 +83,7 @@ async def historic_v2(endpoint, session, request_params, loop = False, attempts 
     NOTE: the received json parses all floats as decimal.Decimal
     """
     # Get root logger
-    _logger = logging.getLogger()
+    _logger = logging.getLogger('polygon')
 
     # dummy initial timestamp of the endpoint for looping
     next_t = 0
@@ -133,7 +133,7 @@ async def historic_v2(endpoint, session, request_params, loop = False, attempts 
                 break
             # other errors: increment attempt by 1 and try again
             else:
-                _logger.debug(f'Unexpected error. Reattempting with {attempts - attempt} left.')
+                _logger.debug(f'Error {resp.status}. Reattempting with {attempts - attempt} left.')
                 attempt += 1
                 await asyncio.sleep(0.1)
     return lst_results
@@ -245,12 +245,15 @@ def load_historic_v2_batches(lst_tickers, request_params, writer, writer_params,
     """
 
     # Logging
-    _logger = logging.getLogger()
-    _logger.setLevel(logger_level)
+    _logger = logging.getLogger('polygon')
+    
     formatter = logging.Formatter('%(asctime)s|%(name)s|%(levelname)s - %(message)s', '%Y-%m-%d %H:%M:%S')
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
     _logger.addHandler(handler)
+    snowflake_handler = logging_utils.SnowflakeHandler(log_location = 'TESTDB.PUBLIC.TEST_LOG')
+    _logger.addHandler(snowflake_handler)
+    _logger.setLevel(logger_level)
 
     # Default data parameters: insert where key is not specified
     data_params = {**{'data_type': 'bar', 'start': None, 'end': None, 'multiplier': 1, 'timespan': 'minute', 'unadjusted': 'true', 'sort': 'asc'}, **data_params}
@@ -358,7 +361,7 @@ def load_historic_v2_batches(lst_tickers, request_params, writer, writer_params,
 
     # Instantiate multiprocessing logger
     # Converts the root logger's handlers to `MultiProcessingHandler`s
-    install_mp_handler()
+    install_mp_handler(_logger)
     _logger.info(f'Spinning up {num_processes} processes: {num_processes_requests} for requests and {num_processes_write} for writing.')
     with mp.Pool(num_processes_requests + num_processes_write) as pool:
         # logger = mp.log_to_stderr(logging.ERROR)
