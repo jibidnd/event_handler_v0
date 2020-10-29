@@ -38,7 +38,7 @@ class Position(event_handler.EventHandler):
             symbol = None
     ):
         self.strategy = strategy
-        self.scope = scope
+        # self.scope = scope
         self.strategy_id = strategy_id
         self.trade_id = trade_id
         self.asset_type = None

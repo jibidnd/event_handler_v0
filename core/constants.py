@@ -41,7 +41,8 @@ QUOTE = 'QUOTE'
 SIGNAL = 'SIGNAL'
 
 # event_subtype for commands
-INFO_REQUEST = 'INFO_REQUEST'
+INFO = 'INFO'
+ACTION = 'ACTION'
 
 # command to be handled
 REQUEST = 'REQUEST'

@@ -51,14 +51,16 @@ class Strategy(event_handler.EventHandler):
         # data and record keeping
         self.parent_id = None
         self.strategy_id = uuid.uuid1() # Note that this shows the network address.
-        self.children_names = {}    # strategy_id: name
+        self.children_names = {}        # name: strategy_id
         self.datas = {}
         self.datas_by_id = {}
         self.cash = CashPosition()
-        self.open_trades = {}    # trade_id: [position_ids]
-        self.closed_trades = {}    # trade_id: [position_ids]
-        self.open_positions = {} # position_id: position object
-        self.closed_positions = {} # position_id: position object
+        self.open_trades = {}           # trade_id: [position_ids]
+        self.closed_trades = {}         # trade_id: [position_ids]
+        self.open_positions = {}        # position_id: position object
+        self.closed_positions = {}      # position_id: position object
+        # TODO
+        self.pending_orders = {}        # orders not yet filled: order_id: order_event
 
     # ----------------------------------------------------------------------------------------------------
     # Communication stuff
@@ -81,7 +83,7 @@ class Strategy(event_handler.EventHandler):
         if not self.children:
             socket = self.zmq_context.socket(zmq.ROUTER)
             self.children = socket
-        self.children.bind(self.children_address)
+        self.children.bind(children_address)
 
     def connect_data_socket(self, data_address):
         # if new address, overwrite the current record
@@ -185,7 +187,7 @@ class Strategy(event_handler.EventHandler):
                 the order is sent to the corresponding position to update the position.
         '''
         event_subtype = order.get(c.EVENT_SUBTYPE)
-        from_children = (order.get(c.STRATEGY_ID) in self.children_names.keys())
+        from_children = (order.get(c.STRATEGY_ID) in self.children_names.values())
         from_self = (order.get(c.STRATEGY_ID) == self.strategy_id)
 
         if from_children  and event_subtype == c.REQUESTED:
@@ -206,13 +208,16 @@ class Strategy(event_handler.EventHandler):
         self.handle_order(order)
 
         return
-    
+    # TODO: handl liquidation rquest
     def _handle_command(self, command):
-        if command[c.EVENT_SUBTYPE] == c.INFO_REQUEST:
+        if command[c.EVENT_SUBTYPE] == c.INFO:
             answer = getattr(self, command[c.REQUEST])
             if hasattr(answer, '__call__'):
                 answer = answer(*command[c.ARGS], **command[c.KWARGS])
             self.parent.send(answer)
+        elif command[c.EVENT_SUBTYPE] == c.ACTION:
+            # TODO: liquidate
+            pass
         return
     
     @abc.abstractmethod
@@ -242,10 +247,10 @@ class Strategy(event_handler.EventHandler):
         # First check if it is in the datas that the strategy is tracking
         if (data := (self.datas.get(identifier) or self.datas_by_id.get(identifier))):
             return data.get(c.PRICE)[-1]
-        
-        # if no such asset exist datas, perhaps it is one of the child strategies
-        elif (strategy := (self.children.get(identifier) or self.children_by_id.get(identifier))):
-            return self.request_info(strategy, c.NET_ASSET_VALUE)
+        # TODO: should child strategy prices already be in self.datas?
+        # # if no such asset exist datas, perhaps it is one of the child strategies
+        # elif (strategy := (self.children.get(identifier) or self.children_by_id.get(identifier))):
+        #     return self.talk_to_child(strategy, c.NET_ASSET_VALUE)
 
     def value_open(self, identifier = None):
         """
@@ -312,13 +317,17 @@ class Strategy(event_handler.EventHandler):
         """NAV / total cash deposited"""
         return self.net_asset_value / self.cash.net_flow
 
-    def request_info(self, child, requested):
-        self.children.send_multipart([child, requested])
+    def talk_to_child(self, child, message):
+        self.children.send_multipart([child, message])
     
 
     # ----------------------------------------------------------------------------------------------------
     # Action stuff
     # ----------------------------------------------------------------------------------------------------
+
+    def create_order(self, order_details, position = None):
+        # TODO
+        pass
 
     def place_order(self, order):
         '''
@@ -359,13 +368,30 @@ class Strategy(event_handler.EventHandler):
                 If None, liquidate all positions. Default None.
 
         Raises:
-            Exception: No trade/position/asset found to liquidate
+            Exception: No trade/position/child strategy found to liquidate
 
         Returns:
             True: order submitted
         """
-        #TODO 
-        pass
+        # If the trade/position is already closed, let the user know
+        if id_or_symbol in self.closed_trades.keys():
+            raise Exception('Trade already closed.')
+        elif (id_or_symbol in self.closed_positions):
+            raise Exception('Posititon already closed.')
+        # If this is a child strategy, send them the note
+        elif id_or_symbol in self.children_names.keys():
+            self.talk_to_child(id_or_symbol, c.LIQUIDATE)
+        elif (id_or_symbol in [position.symbol for position in self.positions]):
+            for position in self.open_positions.values():
+                if position.symbol == id_or_symbol:
+                    closing_order = {c.QUANTITY: -position.quantity_open}
+                    self.place_order(self.create_order(order_details = closing_order, position = position))
+            for order in self.pending_orders.values():
+                if order.get(c.SYMBOL) == id_or_symbol:
+                    self.place_order(order.update({c.ORDER_TYPE: c.CANCELLATION}))
+        else:
+            raise Exception('No trade/position/child strategy found to liquidate.')
+
 
 
 # ----------------------------------------------------------------------------------------------------
