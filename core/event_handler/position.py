@@ -3,6 +3,7 @@
 
 import abc
 import collections
+import uuid
 
 import constants as c
 import event_handler
@@ -33,6 +34,7 @@ class Position(event_handler.EventHandler):
             scope = None,
             strategy_id = None,
             trade_id = None,
+            position_id = None,
             asset_type = None,
             asset_id = None,
             symbol = None
@@ -41,6 +43,7 @@ class Position(event_handler.EventHandler):
         # self.scope = scope
         self.strategy_id = strategy_id
         self.trade_id = trade_id
+        self.position_id = position_id or uuid.uuid1()
         self.asset_type = None
         self.asset_id = asset_id
         self.symbol = None

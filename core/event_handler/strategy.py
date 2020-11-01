@@ -52,6 +52,9 @@ class Strategy(event_handler.EventHandler):
         self.parent_id = None
         self.strategy_id = uuid.uuid1() # Note that this shows the network address.
         self.children_names = {}        # name: strategy_id
+        # If given, sends request to children in self.prenext
+        # Otherwise children will only update with marks when prompted by self.to_child
+        self.children_update_freq = {}  # TODO: define update frequency
         self.datas = {}
         self.datas_by_id = {}
         self.cash = CashPosition()
@@ -61,6 +64,8 @@ class Strategy(event_handler.EventHandler):
         self.closed_positions = {}      # position_id: position object
         # TODO
         self.pending_orders = {}        # orders not yet filled: order_id: order_event
+        # Keeping track of time
+        self.now = None
 
     # ----------------------------------------------------------------------------------------------------
     # Communication stuff
@@ -124,6 +129,23 @@ class Strategy(event_handler.EventHandler):
     # ----------------------------------------------------------------------------------------------------
     # Session stuff
     # ----------------------------------------------------------------------------------------------------
+    def _start(self):
+        pass
+
+    def _prenext(self):
+        # update children marks
+        for child, freq in self.children_update_freq.items():
+            if (data := self.datas.get(child)) is not None:
+                last_ts = data[c.EVENT_TS[-1]]
+                # TODO: define time differences
+                if self.now - last_ts >= freq:
+                    self.to_child(child, c.NET_ASSET_VALUE)
+    
+    def _run(self):
+        pass
+    
+    def _stop(self):
+        pass
 
     @abc.abstractmethod
     def start(self):
@@ -214,7 +236,9 @@ class Strategy(event_handler.EventHandler):
             answer = getattr(self, command[c.REQUEST])
             if hasattr(answer, '__call__'):
                 answer = answer(*command[c.ARGS], **command[c.KWARGS])
-            self.parent.send(answer)
+            wrapped_answer = event.data_event({c.EVENT_SUBTYPE: c.SIGNAL, c.SYMBOL: self.strategy_id})
+            wrapped_answer.update({c.REQUEST: answer})
+            self.to_parent(wrapped_answer)
         elif command[c.EVENT_SUBTYPE] == c.ACTION:
             # TODO: liquidate
             pass
@@ -250,7 +274,7 @@ class Strategy(event_handler.EventHandler):
         # TODO: should child strategy prices already be in self.datas?
         # # if no such asset exist datas, perhaps it is one of the child strategies
         # elif (strategy := (self.children.get(identifier) or self.children_by_id.get(identifier))):
-        #     return self.talk_to_child(strategy, c.NET_ASSET_VALUE)
+        #     return self.to_child(strategy, c.NET_ASSET_VALUE)
 
     def value_open(self, identifier = None):
         """
@@ -317,17 +341,25 @@ class Strategy(event_handler.EventHandler):
         """NAV / total cash deposited"""
         return self.net_asset_value / self.cash.net_flow
 
-    def talk_to_child(self, child, message):
+    def to_child(self, child, message):
         self.children.send_multipart([child, message])
     
+    def to_parent(self, message):
+        self.to_parent(message)
 
     # ----------------------------------------------------------------------------------------------------
     # Action stuff
     # ----------------------------------------------------------------------------------------------------
 
     def create_order(self, order_details, position = None):
-        # TODO
-        pass
+        default_order_details = {
+            c.STRATEGY_ID: self.strategy_id,
+            c.TRADE_ID: position.trade_id,
+            c.POSITION_ID: position.position_id,
+            c.SYMBOL: position.symbol,
+            }
+        
+        return event.order_event(default_order_details.update(order_details))
 
     def place_order(self, order):
         '''
@@ -350,7 +382,7 @@ class Strategy(event_handler.EventHandler):
         if self.parent is None:
             self.order_socket.send(order)
         else:
-            self.parent.send(order)
+            self.to_parent(order)
     
     def deny_order(self, order):
         '''
@@ -380,7 +412,7 @@ class Strategy(event_handler.EventHandler):
             raise Exception('Posititon already closed.')
         # If this is a child strategy, send them the note
         elif id_or_symbol in self.children_names.keys():
-            self.talk_to_child(id_or_symbol, c.LIQUIDATE)
+            self.to_child(id_or_symbol, c.LIQUIDATE)
         elif (id_or_symbol in [position.symbol for position in self.positions]):
             for position in self.open_positions.values():
                 if position.symbol == id_or_symbol:

@@ -39,6 +39,7 @@ TICK = 'TICK'
 BAR = 'BAR'
 QUOTE = 'QUOTE'
 SIGNAL = 'SIGNAL'
+# INFO = 'INFO'
 
 # event_subtype for commands
 INFO = 'INFO'
