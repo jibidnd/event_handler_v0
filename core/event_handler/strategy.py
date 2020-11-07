@@ -15,7 +15,7 @@ from .. import event
 
 class Strategy(event_handler.EventHandler):
     def __init__(self, name = None, zmq_context = None, parent_address = None, children_addresses = None,
-                    data_address = None, order_address = None, logging_addresses = None,
+                    data_address = None, order_address = None, logging_addresses = None, strategy_address = None,
                     params = {}, rms = RMS()):
         # initialization params
         self.name = name
@@ -25,6 +25,7 @@ class Strategy(event_handler.EventHandler):
         self.data_address = data_address
         self.order_address = order_address
         self.logging_addresses = logging_addresses
+        self.strategy_address = strategy_address
         self.params = params
         self.rms = rms
 
@@ -51,10 +52,10 @@ class Strategy(event_handler.EventHandler):
         # data and record keeping
         self.parent_id = None
         self.strategy_id = uuid.uuid1() # Note that this shows the network address.
-        self.children_names = {}        # name: strategy_id
+        self.children_ids = {}        # name: strategy_id
         # If given, sends request to children in self.prenext
         # Otherwise children will only update with marks when prompted by self.to_child
-        self.children_update_freq = {}  # TODO: define update frequency
+        self.children_update_freq = {}  # strategy_id: datetime.timedelta
         self.datas = {}
         self.datas_by_id = {}
         self.cash = CashPosition()
@@ -65,7 +66,7 @@ class Strategy(event_handler.EventHandler):
         # TODO
         self.pending_orders = {}        # orders not yet filled: order_id: order_event
         # Keeping track of time
-        self.now = None
+        self.clock = None
 
     # ----------------------------------------------------------------------------------------------------
     # Communication stuff
@@ -126,24 +127,56 @@ class Strategy(event_handler.EventHandler):
             'No data socket to subscribe data from.'
         self.data_socket.setsockopt(zmq.SUBSCRIBE, topic)
 
+    def add_child(self, child_name, child_strategy_id, child_update_freq, child_address = None):
+        """Add a child.
+
+            If child_address is provided, connect to that address.
+            Otherwise assume that child is reacheable via one of children_addresses.
+
+        Args:
+            child_name (str): name of the child. Must be unique in the strategy.
+            child_strategy (str): The strategy_id to identify the (existing) child by.
+            child_update_freq (datetime.timedelta): How often the child's mark should be updated.
+                                                    To update constantly (each _prenext), set to <0.
+            child_address (str, optional): Address of the child if not already in self.children_addresses. Defaults to None.
+        """
+        self.children_ids[child_name] = child_strategy_id
+        self.children_update_freq[child_strategy_id] = child_update_freq
+        if child_address is not None:
+            self.connect_children(child_address)
+        return
+
+
     # ----------------------------------------------------------------------------------------------------
     # Session stuff
     # ----------------------------------------------------------------------------------------------------
     def _start(self):
+
         pass
 
     def _prenext(self):
-        # update children marks
+        # update children marks if it is time
         for child, freq in self.children_update_freq.items():
             if (data := self.datas.get(child)) is not None:
+                # has it been a while since we had the last mark?
                 last_ts = data[c.EVENT_TS[-1]]
                 # TODO: define time differences
-                if self.now - last_ts >= freq:
+                if self.clock - last_ts >= freq:
                     self.to_child(child, c.NET_ASSET_VALUE)
     
     def _run(self):
-        pass
-    
+        poller = zmq.Poller()
+        poller.register(self.parent, zmq.POLLIN)
+        poller.register(self.children, zmq.POLLIN)
+        poller.register(self.data_socket, zmq.POLLIN)
+        poller.register(self.order_socket, zmq.POLLIN)
+        while True:
+            events = poller.poll()
+            for socket, event_mask in events:
+                if event_mask == zmq.POLLIN:
+                    ident, event = socket.recv_multipart()
+                    self.handle_event(event)
+
     def _stop(self):
         pass
 
@@ -209,7 +242,7 @@ class Strategy(event_handler.EventHandler):
                 the order is sent to the corresponding position to update the position.
         '''
         event_subtype = order.get(c.EVENT_SUBTYPE)
-        from_children = (order.get(c.STRATEGY_ID) in self.children_names.values())
+        from_children = (order.get(c.STRATEGY_ID) in self.children_ids.values())
         from_self = (order.get(c.STRATEGY_ID) == self.strategy_id)
 
         if from_children  and event_subtype == c.REQUESTED:
@@ -350,8 +383,15 @@ class Strategy(event_handler.EventHandler):
     # ----------------------------------------------------------------------------------------------------
     # Action stuff
     # ----------------------------------------------------------------------------------------------------
+    # TODO
+    def create_position(self, trade_id = None):
+        pass
 
     def create_order(self, order_details, position = None):
+        #TODO:
+        if position is None:
+            position = self.create_position({trade_id = order_details.get(c.TRADE_ID)})
+        
         default_order_details = {
             c.STRATEGY_ID: self.strategy_id,
             c.TRADE_ID: position.trade_id,
@@ -411,7 +451,9 @@ class Strategy(event_handler.EventHandler):
         elif (id_or_symbol in self.closed_positions):
             raise Exception('Posititon already closed.')
         # If this is a child strategy, send them the note
-        elif id_or_symbol in self.children_names.keys():
+        elif id_or_symbol in self.children_ids.keys():
+            self.to_child(children_ids[id_or_symbol], c.LIQUIDATE)
+        elif id_or_symbol in self.children_ids.values():
             self.to_child(id_or_symbol, c.LIQUIDATE)
         elif (id_or_symbol in [position.symbol for position in self.positions]):
             for position in self.open_positions.values():
@@ -482,7 +524,7 @@ class lines(dict):
             if self.include_only is None:
                 self._tracked = set(data.keys()) - self.exclude
             else:
-                self._tracked = (set(data.keys()) & self.include_only) - self.exclude
+                self._tracked = self.include_only - self.exclude
             
             # Create a deque for each tracked field
             self.update(**{line: collections.deque() for line in self._tracked})

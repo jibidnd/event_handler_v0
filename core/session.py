@@ -6,8 +6,18 @@ import abc
 
 def Session(abc.ABC):
     def __init__(self):
-        pass
+        self.strategies = {}
     
+    def run(self):
+        # TODO
+        # What to do?
+
+        # start all strategies and make sure they're running
+        # start bob and make sure it is running
+        # ping console
+        # start data
+        
+
     @property
     @abc.abstractmethod
     def console(self):
