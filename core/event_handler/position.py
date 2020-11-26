@@ -5,9 +5,8 @@ import abc
 import collections
 import uuid
 
-import constants as c
-import event_handler
-
+from .. import constants as c
+from .. import event_handler
 
 
 class Position(event_handler.EventHandler):
@@ -56,10 +55,10 @@ class Position(event_handler.EventHandler):
         self.debit = 0  # net decreases to cash (filled orders)
         self.transactions = collections.deque(maxlen = None)
 
-    def handle_data(self, data):
+    def _handle_data(self, data):
         pass
 
-    def handle_order(self, order):
+    def _handle_order(self, order):
         '''Handle order events that are generated from this strategy'''
         # log the transaction
         self.transactions.append(order)
@@ -120,10 +119,10 @@ class CashPosition(event_handler.EventHandler):
         self.value_pending = 0
         self.transactions = collections.deque(maxlen = None)
     
-    def handle_data(self, data):
+    def _handle_data(self, data):
         pass
 
-    def handle_order(self, order):
+    def _handle_order(self, order):
         '''Handle order events that are generated from this strategy'''
         # log the transaction
         self.transactions.append(order)

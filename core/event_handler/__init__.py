@@ -13,7 +13,7 @@ A strategy contains the business logic for making actions given events.
 import abc
 import collections
 
-from constants import *
+from .. import constants as c
 
 
 class EventHandler(abc.ABC):
@@ -30,18 +30,18 @@ class EventHandler(abc.ABC):
     def handle_event(self, event):
         '''process the next event'''
         try:
-            event_type = event['type']
+            event_type = event[c.EVENT_TYPE]
         except KeyError:
-            raise 'Event type not specified'
+            raise Exception('Event type not specified')
         
-        if event_type == DATA:
+        if event_type == c.DATA:
             self._handle_data(event)
-        elif event_type == ORDER:
+        elif event_type == c.ORDER:
             self._handle_order(event)
-        elif event_type == COMMAND:
+        elif event_type == c.COMMAND:
             self._handle_command(event)
         else:
-            raise 'Event type {} not supported.'.format(event_type)
+            raise Exception('Event type {} not supported.'.format(event_type))
     
     @abc.abstractmethod
     def _handle_data(self, event):
@@ -53,9 +53,9 @@ class EventHandler(abc.ABC):
         '''Handle an order event.'''
         return
 
-    @abc.abstractmethod
-    def _handle_command(self, command_event):
-        return
+    # @abc.abstractmethod
+    # def _handle_command(self, command_event):
+    #     return
 
 
 class Trade:

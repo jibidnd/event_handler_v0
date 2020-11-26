@@ -1,14 +1,37 @@
 '''
 A session coordinates instances of events, brokers, and strategies.
 '''
+import threading
 
-import abc
+import zmq
 
-def Session(abc.ABC):
+from . import data
+
+class Session:
     def __init__(self):
-        self.strategies = {}
+        self.strategies = []    # Strategy instances
+        self.datafeeds = []     # tuple(topic, datafeed generator)
+        self.data_address = None   
+        self.zmq_context = zmq.Context()
     
     def run(self):
+        # Start strategies
+        for strategy in self.strategies:
+            strategy.start()
+
+        self.bob.start()
+
+        # self.console.is_alive?
+
+        # Start datafeeds
+        datafeed_threads = []
+        for topic, datafeed in self.datafeeds:
+            datafeed_threads.append(threading.Thread(target = data.publish, args = (self.data_address, topic, datafeed, zmq_context)), daemon = True)
+
+        for data_thread in datafeed_threads:
+            data_thread.start()
+            
+
         # TODO
         # What to do?
 
@@ -18,42 +41,14 @@ def Session(abc.ABC):
         # start data
         
 
-    @property
-    @abc.abstractmethod
-    def console(self):
-        '''The console from which the session will receive commands/send messages'''
-        pass
-    
-    @property
-    @abc.abstractmethod
-    def bob(self):
-        pass
-
-    @abc.abstractmethod
-    def add_strategies(self):
+    def add_strategies(self, strategy):
         '''add strategies to the session'''
-        pass
+        self.strategies.append(strategy)
     
-    @abc.abstractmethod
-    def add_data(self):
+    def add_datafeed(self, topic, datafeed):
         '''add data feeds'''
+        self.datafeeds.append((topic, datafeed))
 
-    @abc.abstractmethod
-    def start_data(self):
-        '''start data feeds'''
-        pass
-
-    @abc.abstractmethod
-    def start_bob(self):
-        '''start broker of brokers instance'''
-        pass
-
-    @abc.abstractmethod
-    def start_strategy(self):
-        '''start an added strategy'''
-        pass
-
-    @abc.abstractmethod
-    def kill_strategy(self):
-        '''Kill a strategy'''
-        pass
+    # def kill_strategy(self):
+    #     '''Kill a strategy'''
+    #     pass

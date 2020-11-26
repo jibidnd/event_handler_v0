@@ -26,7 +26,7 @@ However having a central ETC to dispatch events is easier to manage, and strateg
 # Templates
 
 import datetime
-import constants as c
+from .. import constants as c
 
 def order_event(dict_order_details = {}):
     '''
