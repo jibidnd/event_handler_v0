@@ -18,7 +18,9 @@ NANOSECONDS_PER_DAY = NANOSECONDS_PER_SECOND * SECONDS_PER_DAY
 
 
 
-
+# ----------------------------------------------------------------------------------------------------
+# Data stuff
+# ----------------------------------------------------------------------------------------------------
 
 def generate_days(start, end, step_in_days):
     '''
@@ -46,9 +48,16 @@ def to_columnar(lst_dicts, data_keys) -> dict:
     '''
     return {k: [dict_i.get(k) for dict_i in lst_dicts] for k in data_keys}
 
+def unix2datetime(unix_timestamp, from_tz = pytz.timezone('UTC'), to_tz = pytz.timezone('America/New_York')):
+    '''
+    Converts a unix timestamp @ tz in resolution to a datetime.datetime object
+    '''
+    return datetime.datetime.fromtimestamp(unix_timestamp, tz = from_tz).astimezone(to_tz)
+
+
 def unix2num(unix_timestamp, tz = pytz.timezone('UTC'), resolution = 'milliseconds'):
     """
-    Convert a unix timestamp (nanosecond resolution) to the Gregorian
+    Convert a unix timestamp (with specified resolution) to the Gregorian
     date as UTC float days, preserving hours, minutes, seconds, microseconds,
     and nanoseconds.
     Return value is a :func:`float`.

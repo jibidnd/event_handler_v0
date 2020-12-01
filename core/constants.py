@@ -61,6 +61,7 @@ HIGH = 'HIGH'
 LOW = 'LOW'
 CLOSE = 'CLOSE'
 PRICE = 'PRICE'
+MARK = 'MARK'
 
 # Asset classes
 # STRATEGY = 'STRATEGY'

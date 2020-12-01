@@ -25,38 +25,37 @@ class Position(event_handler.EventHandler):
 
     Orders that are sent for approval (REQUESTED)/ to the broker (SUBMITTED) are treated as submitted,
         and are reverted if a FAILED/DENIED/EXPIRED/REJECTED order event is received.
+    
+    If no trade_id is specified, defaults to most recent open trade. If there are no open trades, create a new one.
     '''
 
     def __init__(
             self,
             strategy,
-            scope = None,
-            strategy_id = None,
             trade_id = None,
             position_id = None,
             asset_type = None,
-            asset_id = None,
             symbol = None
     ):
         self.strategy = strategy
         # self.scope = scope
-        self.strategy_id = strategy_id
-        self.trade_id = trade_id
+        self.strategy_id = self.strategy.strategy_id
+        self.trade_id = trade_id or ([uuid.uuid1()] + list(self.strategy.open_trades.keys()))[-1]
         self.position_id = position_id or uuid.uuid1()
-        self.asset_type = None
-        self.asset_id = asset_id
-        self.symbol = None
+        self.asset_type = asset_type
+        self.symbol = symbol
         self.status = None
         self.risk = None
         self.quantity_open = 0
         self.quantity_pending = 0
+        self.value_pending = 0
         self.commission = 0
         self.credit = 0 # net increases to cash (filled orders)
         self.debit = 0  # net decreases to cash (filled orders)
         self.transactions = collections.deque(maxlen = None)
 
     def _handle_data(self, data):
-        pass
+        return self.handle_data(data)
 
     def _handle_order(self, order):
         '''Handle order events that are generated from this strategy'''
@@ -94,20 +93,33 @@ class Position(event_handler.EventHandler):
         elif event_subtype in [c.FAILED, c.EXPIRED, c.CANCELLED, c.REJECTED]:
             self.quantity_pending -= order[c.QUANTITY]
             self.value_pending -= order[c.QUANTITY] * order[c.PRICE]    # approx fill price
+        
+        return self.handle_order(order)
+    
+    def _handle_command(self, command):
+        return self.handle_command(command)
 
     # read only properties are computed when requested
     @property
     def value_open(self):
-        return self.quantity_open * self.strategy.get_mark(self.asset_id)
-    
-    @property
-    def value_pending(self):
-        return self.quantity_pending * self.strategy.get_mark(self.asset_id)
+        return self.quantity_open * self.strategy.get_mark(self.symbol)
+
+    # @property
+    # def value_pending(self):
+    #     return self.quantity_pending * self.strategy.get_mark(self.symbol)
 
     @property
     def total_pnl(self):
         '''Realized + unrealized PNL'''
         return self.credit + self.value_open - self.debit
+
+    # for if we want to add custom action (e.g. notify on fill)
+    def handle_data(self, data):
+        pass
+    def handle_order(self, order):
+        pass
+    def handle_command(self, command):
+        pass
 
 
 class CashPosition(event_handler.EventHandler):
@@ -116,11 +128,11 @@ class CashPosition(event_handler.EventHandler):
     def __init__(self):
         self.balance = 0
         self.net_flow = 0    # the net deposit/withdrawals to this cash position
-        self.value_pending = 0
+        # self.value_pending = 0
         self.transactions = collections.deque(maxlen = None)
     
     def _handle_data(self, data):
-        pass
+        return self.handle_data()
 
     def _handle_order(self, order):
         '''Handle order events that are generated from this strategy'''
@@ -157,3 +169,16 @@ class CashPosition(event_handler.EventHandler):
         # else a cash flow event. Update balance and net_flow accordingly
             self.balance += order[c.NET]
             self.net_flow += order[c.NET]
+
+        return self.handle_order()
+
+    def _handle_command(self, command):
+        return self.handle_command()
+
+    # for if we want to add custom action (e.g. notify on cash increase)
+    def handle_data(self, data):
+        pass
+    def handle_order(self, order):
+        pass
+    def handle_command(self, command):
+        pass

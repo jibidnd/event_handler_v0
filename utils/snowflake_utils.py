@@ -35,6 +35,7 @@ from queue import Empty
 import configparser
 from tempfile import TemporaryDirectory
 import logging
+import time
 
 import pyarrow as pa
 from pyarrow import parquet as pq
@@ -96,13 +97,15 @@ class SnowflakeWriter(object):
             - body: pyarrow table, pandas dataframe, or string
         '''
         q_to_write = q_to_write or self.q_to_write
-
+        started = False
         while True:
             try:
                 # Get job from queue
-                job = q_to_write.get(block = False)
+                job = q_to_write.get(timeout = 10)
+                if job == 'DONE':
+                    break
             except Empty:
-                return
+                time.sleep(1)
             else:
                 database = job['writer_params']['snowflake_database']
                 schema = job['writer_params']['snowflake_schema']
@@ -110,8 +113,8 @@ class SnowflakeWriter(object):
                 body = job['body']
                 if isinstance(body, str):
                     pass
-                elif isinstance(body, (pa.table, pd.DataFrame)):
-                    self.write_table(body, table_name, database, schema)    # use default arguments
+                elif isinstance(body, (pa.Table, pd.DataFrame)):
+                    self.write(body, table_name, database, schema)    # use default arguments
                 q_to_write.task_done()
         return
 

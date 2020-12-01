@@ -190,6 +190,7 @@ def load_historic_v2_batch(q_to_request, q_to_write) -> None:
             # Get job from queue
             job = q_to_request.get(block = False)
         except Empty:
+            q_to_write.put('DONE')
             return
         else:
             # Run historic_v2_batch and gather results
@@ -200,7 +201,6 @@ def load_historic_v2_batch(q_to_request, q_to_write) -> None:
             if pa_tbl.num_rows > 0:
                 q_to_write.put({'body': pa_tbl, **job})
             q_to_request.task_done()
-
     return
 
 def load_historic_v2_batches(lst_tickers, request_params, writer, writer_params, data_params = {}, logger_level = logging.INFO):
@@ -367,10 +367,10 @@ def load_historic_v2_batches(lst_tickers, request_params, writer, writer_params,
         # logger = mp.log_to_stderr(logging.ERROR)
         for _ in range(num_processes_requests):
             res = pool.apply_async(load_historic_v2_batch, args = (q_to_request, q_to_write))
-            res.get()
+            # res.get()
         for _ in range(num_processes_write):
             res = pool.apply_async(writer, args = (q_to_write,))
-            res.get()
+            # res.get()
         pool.close()
         pool.join()
     return

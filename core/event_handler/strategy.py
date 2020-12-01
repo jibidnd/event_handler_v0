@@ -5,14 +5,18 @@ import abc
 import collections
 import uuid
 from decimal import Decimal
+import datetime
+import pytz
 
 import zmq
 import msgpack
 
 from .. import constants as c
 from .. import event_handler
+from ..event_handler import event
 from .position import Position, CashPosition
-from .. import event
+from ... import utils
+# from .. import event
 
 class Strategy(event_handler.EventHandler):
     def __init__(self, name = None, zmq_context = None, parent_address = None, children_addresses = None,
@@ -29,6 +33,28 @@ class Strategy(event_handler.EventHandler):
         self.strategy_address = strategy_address
         self.params = params
         self.rms = rms or RMS()
+
+        # data and record keeping
+        self.parent_id = None
+        self.strategy_id = uuid.uuid1() # Note that this shows the network address.
+        self.children_ids = {}        # name: strategy_id
+        # If given, sends request to children in self.prenext
+        # Otherwise children will only update with marks when prompted by self.to_child
+        self.children_update_freq = {}  # strategy_id: datetime.timedelta
+        self.datas = {}
+        self.cash = CashPosition()
+        self.open_trades = {}           # trade_id: [position_ids]
+        self.closed_trades = {}         # trade_id: [position_ids]
+        self.open_positions = {}        # position_id: position object
+        self.closed_positions = {}      # position_id: position object
+        # TODO
+        self.pending_orders = {}        # orders not yet filled: order_id: order_event
+        # Keeping track of time: internally, time will be tracked as NY local time.
+        # For communication, (float) timestamps on the second resolution @ UTC will be used.
+        self.clock = None
+        # The event "queue"
+        self.next_events = {}
+
 
         # Connection things
         self.parent = None
@@ -49,26 +75,6 @@ class Strategy(event_handler.EventHandler):
         if self.logging_addresses is not None:
             for logging_address in logging_addresses:
                 self.connect_logging_socket(logging_address)
-
-        # data and record keeping
-        self.parent_id = None
-        self.strategy_id = uuid.uuid1() # Note that this shows the network address.
-        self.children_ids = {}        # name: strategy_id
-        # If given, sends request to children in self.prenext
-        # Otherwise children will only update with marks when prompted by self.to_child
-        self.children_update_freq = {}  # strategy_id: datetime.timedelta
-        self.datas = {}
-        self.cash = CashPosition()
-        self.open_trades = {}           # trade_id: [position_ids]
-        self.closed_trades = {}         # trade_id: [position_ids]
-        self.open_positions = {}        # position_id: position object
-        self.closed_positions = {}      # position_id: position object
-        # TODO
-        self.pending_orders = {}        # orders not yet filled: order_id: order_event
-        # Keeping track of time
-        self.clock = None
-        # The event "queue"
-        self.next_events = {}
 
     # ----------------------------------------------------------------------------------------------------
     # Communication stuff
@@ -113,7 +119,7 @@ class Strategy(event_handler.EventHandler):
             socket = self.zmq_context.socket(zmq.DEALER)
             socket.setsockopt(zmq.IDENTITY, self.strategy_id.bytes)
             self.order_socket = socket
-        self.order_socket.conenct(order_address)
+        self.order_socket.connect(order_address)
 
     def connect_logging_socket(self, logging_address):
         # if new address, add it to the list
@@ -180,18 +186,22 @@ class Strategy(event_handler.EventHandler):
                 event will be handled.
 
                 The logic then resets and loops forever.
-        '''
+        '''   
         # TODO: what if we lag behind in processing? how do we catch up?
         global keep_running
         keep_running = True
         while keep_running:
-            # Attempt to fill the event queue if any slot is empty
+            # Attempt to fill the event queue for any slots that are empty
             for name, socket in zip([c.DATA_SOCKET, c.ORDER_SOCKET, c.PARENT_SOCKET, c.CHILDREN_SOCKET],
                                     [self.data_socket, self.order_socket, self.parent, self.children]):
                 if socket is None: continue
                 if self.next_events.get(name) is None:
                     try:
-                        topic, event = socket.recv_multipart(zmq.NOBLOCK)
+                        # Attempt to receive from each socket, but do not block
+                        if socket.socket_type in [zmq.SUB, zmq.ROUTER]:
+                            topic, event = socket.recv_multipart(zmq.NOBLOCK)
+                        elif socket.socket_type in [zmq.DEALER]:
+                            event = socket.recv(zmq.NOBLOCK)
                         self.next_events[name] = msgpack.unpackb(event)
                     except zmq.ZMQError as exc:
                         if exc.errno == zmq.EAGAIN:
@@ -201,40 +211,14 @@ class Strategy(event_handler.EventHandler):
                 
             # Now we can sort the upcoming events and handle the next event
             if len(self.next_events) > 0:
-                next_up = sorted(self.next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
-                self.handle_event(self.next_events.pop(next_up))       # remove the event from self.next_events and handle said event
-
-
-
-        # poller = zmq.Poller()
-        # poller.register(self.parent, zmq.POLLIN)
-        # poller.register(self.children, zmq.POLLIN)
-        # # poller.register(self.data_socket, zmq.POLLIN)
-        # poller.register(self.order_socket, zmq.POLLIN)
-        # while True:
-        #     self.prenext()
-        #     events = poller.poll()
-        #     for socket, event_mask in events:
-        #         if event_mask == zmq.POLLIN:
-        #             ident, event = socket.recv_multipart()
-        #             self.handle_event(msgpack.unpackb(event))
-
-
-        # # TODO: how should backtests be handled? Events don't come in at real time
-        # while True:
-        #     self.prenext()
-        #     if event_queue is empty:
-        #         for socket in sockets:
-        #             while True:
-        #                 event = socket.recv_multipart()
-        #                 event_queue.append(msgpack.unpackb(event))
-        #                 if event['event_ts'] > self.clock:
-        #                     break
-        #     event_queue.sort(key = lambda x: x['event_ts'])
-        #     for event in event_queue:
-        #         self.handle_event(event)
-        #     if not self.is_live:
-        #         self.clock += clock_resolution
+                # Handle the socket with the next soonest event (by EVENT_TS)
+                next_socket = sorted(self.next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
+                next_event = self.next_events.pop(next_socket)        # remove the event from self.next_events
+                # tick the clock if it's a valid timestamp
+                print(next_event[c.EVENT_TS])
+                if (tempts := next_event[c.EVENT_TS]) > 0:
+                    self.clock = utils.unix2datetime(tempts)
+                self.handle_event(next_event)
 
     def stop(self):
         '''Prior to exiting. Gives user a chance to wrap things up and exit clean'''
@@ -349,7 +333,7 @@ class Strategy(event_handler.EventHandler):
         """
         # Get most recent datapoint
         if (data := self.datas.get(identifier)):
-            return data.get(c.PRICE)[-1]
+            return data.mark[-1]
 
     def value_open(self, identifier = None):
         """
@@ -425,23 +409,31 @@ class Strategy(event_handler.EventHandler):
     # ----------------------------------------------------------------------------------------------------
     # Action stuff
     # ----------------------------------------------------------------------------------------------------
-    # TODO
-    def create_position(self, trade_id = None):
-        pass
+    def create_position(self, trade_id = None, position_id = None, asset_type = None, symbol = None):
+        position = Position(self, trade_id, position_id, asset_type, symbol)
+        return position
 
     def create_order(self, order_details, position = None):
-        #TODO:
+        
         if position is None:
-            position = self.create_position({trade_id: order_details.get(c.TRADE_ID)})
+            # If there is a position with the symbol already, use the latest one of the positions with the same symbol
+            current_positions_in_symbol = [pos for pos_id, pos in self.open_positions.values() if pos.symbol == order_details[c.SYMBOL]]
+            if len(current_positions_in_symbol) > 0:
+                position = current_positions_in_symbol[-1]
+            else:
+                # else create a new position
+                position = self.create_position(trade_id = order_details.get(c.TRADE_ID))
         
         default_order_details = {
             c.STRATEGY_ID: self.strategy_id,
             c.TRADE_ID: position.trade_id,
             c.POSITION_ID: position.position_id,
+            c.ORDER_ID: uuid.uuid1(),
             c.SYMBOL: position.symbol,
+            c.EVENT_TS: self.clock
             }
         
-        return event.order_event(default_order_details.update(order_details))
+        return event.order_event({**default_order_details, **order_details})
 
     def place_order(self, order):
         '''
@@ -462,7 +454,7 @@ class Strategy(event_handler.EventHandler):
 
         # place the order
         if self.parent is None:
-            self.order_socket.send(order)
+            self.order_socket.send(msgpack.packb(order, use_bin_type = True, default = default_msgpack_packer))
         else:
             self.to_parent(order)
     
@@ -472,7 +464,7 @@ class Strategy(event_handler.EventHandler):
         Send the denial to the child.
         '''
         order = order.update(event_subtype = c.DENIED)
-        self.children.send_multipart(event.order_event[c.STRATEGY_ID], order)
+        self.children.send_multipart(order[c.STRATEGY_ID], order)
 
     def liquidate(self, id_or_symbol = None, order_details = {c.ORDER_TYPE: c.MARKET}):
         """Liquidate a trade, position, or positions on the specified symbol.
@@ -497,7 +489,7 @@ class Strategy(event_handler.EventHandler):
             self.to_child(children_ids[id_or_symbol], c.LIQUIDATE)
         elif id_or_symbol in self.children_ids.values():
             self.to_child(id_or_symbol, c.LIQUIDATE)
-        elif (id_or_symbol in [position.symbol for position in self.positions]):
+        elif (id_or_symbol in [position.symbol for position in self.open_positions]):
             for position in self.open_positions.values():
                 if position.symbol == id_or_symbol:
                     closing_order = {c.QUANTITY: -position.quantity_open}
@@ -511,8 +503,14 @@ class Strategy(event_handler.EventHandler):
 
 
 # ----------------------------------------------------------------------------------------------------
-# Misc Classes
+# Misc Classes and fucntions
 # ----------------------------------------------------------------------------------------------------
+
+def default_msgpack_packer(obj):
+    try:
+        return float(obj)
+    except:
+        return str(obj)
 
 class RMS(abc.ABC):
     '''A risk management system that monitors risk and approves/denies order requests'''
@@ -543,19 +541,20 @@ class lines(dict):
         
         
     """
-    def __init__(self, data_type, symbol, include_only = None, exclude = set()):       
+    def __init__(self, data_type, symbol, include_only = None, exclude = set(), maxlen = None, mark_line = 'CLOSE'):       
         
         self.__initialized = False
         self.data_type = data_type
         self.symbol = symbol
         self.include_only = include_only
         self.exclude = exclude
+        self.mark_line = mark_line
 
         # Keep a tab on what's tracked
         if include_only is not None:
             self._tracked = include_only - exclude
             for line in self._tracked:
-                self[line] = collections.deque()
+                self[line] = collections.deque(maxlen = maxlen)
         else:
             self._tracked = None
         
@@ -574,6 +573,10 @@ class lines(dict):
 
         for line in self._tracked:
             self[line].append(data.get(line))
+
+    @property
+    def mark(self):
+        return self.get(self.mark_line)
 
     @property
     def include_only(self):
