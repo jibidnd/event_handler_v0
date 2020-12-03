@@ -26,7 +26,7 @@ class EventHandler(abc.ABC):
     def __init__(self):
         pass
 
-    def handle_event(self, event):
+    def _handle_event(self, event):
         '''process the next event'''
         try:
             event_type = event[c.EVENT_TYPE]
@@ -41,9 +41,11 @@ class EventHandler(abc.ABC):
             self._handle_command(event)
         else:
             raise Exception('Event type {} not supported.'.format(event_type))
+        
+        return self.handle_event(event)
     
     @abc.abstractmethod
-    def _handle_data(self, event):
+    def _handle_data(self, data):
         '''Handle a data event'''
         return
     
@@ -54,6 +56,9 @@ class EventHandler(abc.ABC):
 
     @abc.abstractmethod
     def _handle_command(self, command_event):
+        return
+    
+    def handle_event(self, event):
         return
 
 class EventHandlerTemplate(EventHandler):
