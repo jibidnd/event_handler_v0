@@ -32,18 +32,18 @@ class Position(event_handler.EventHandler):
     def __init__(
             self,
             strategy,
+            symbol,
+            asset_class = c.EQUITY,
             trade_id = None,
-            position_id = None,
-            asset_type = None,
-            symbol = None
+            position_id = None
     ):
         self.strategy = strategy
         # self.scope = scope
         self.strategy_id = self.strategy.strategy_id
-        self.trade_id = trade_id or ([uuid.uuid1()] + list(self.strategy.open_trades.keys()))[-1]
-        self.position_id = position_id or uuid.uuid1()
-        self.asset_type = asset_type
         self.symbol = symbol
+        self.asset_class = asset_class
+        self.trade_id = trade_id or ([str(uuid.uuid1())] + list(self.strategy.open_trades.keys()))[-1]
+        self.position_id = position_id or str(uuid.uuid1())
         self.status = None
         self.risk = None
         self.quantity_open = 0
@@ -170,7 +170,7 @@ class CashPosition(event_handler.EventHandler):
             self.balance += order[c.NET]
             self.net_flow += order[c.NET]
 
-        return self.handle_order()
+        return self.handle_order(order)
 
     def _handle_command(self, command):
         return self.handle_command()

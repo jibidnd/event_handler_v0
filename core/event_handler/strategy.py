@@ -36,7 +36,7 @@ class Strategy(event_handler.EventHandler):
 
         # data and record keeping
         self.parent_id = None
-        self.strategy_id = uuid.uuid1() # Note that this shows the network address.
+        self.strategy_id = str(uuid.uuid1()) # Note that this shows the network address.
         self.children_ids = {}        # name: strategy_id
         # If given, sends request to children in self.prenext
         # Otherwise children will only update with marks when prompted by self.to_child
@@ -86,7 +86,7 @@ class Strategy(event_handler.EventHandler):
         # Create a parent socket if none exists yet
         if not self.parent:
             socket = self.zmq_context.socket(zmq.DEALER)
-            socket.setsockopt(zmq.IDENTITY, self.strategy_id.bytes)
+            socket.setsockopt(zmq.IDENTITY, self.strategy_id.encode())
             self.parent = socket
         self.parent.connect(self.parent_address)
 
@@ -108,7 +108,7 @@ class Strategy(event_handler.EventHandler):
         if not self.data_socket:
             socket = self.zmq_context.socket(zmq.SUB)
             # subscribe to data with prefix the strategy's id
-            socket.setsockopt(zmq.SUBSCRIBE, self.strategy_id.bytes)
+            socket.setsockopt(zmq.SUBSCRIBE, self.strategy_id.encode())
             self.data_socket = socket
         self.data_socket.connect(data_address)
         
@@ -118,7 +118,7 @@ class Strategy(event_handler.EventHandler):
         # Create a order socket if none exists yet
         if not self.order_socket:
             socket = self.zmq_context.socket(zmq.DEALER)
-            socket.setsockopt(zmq.IDENTITY, self.strategy_id.bytes)
+            socket.setsockopt(zmq.IDENTITY, self.strategy_id.encode())
             self.order_socket = socket
         self.order_socket.connect(order_address)
 
@@ -129,7 +129,7 @@ class Strategy(event_handler.EventHandler):
         # Create a logging socket if none exists yet
         if not self.logging_socket:
             socket = self.zmq_context.socket(zmq.DEALER)
-            socket.setsockopt(zmq.IDENTITY, self.strategy_id.bytes)
+            socket.setsockopt(zmq.IDENTITY, self.strategy_id.encode())
             self.logging_socket = socket
         self.logging_socket.conenct(logging_address)
     
@@ -151,7 +151,7 @@ class Strategy(event_handler.EventHandler):
                                                     To update constantly (each _prenext), set to <0.
             child_address (str, optional): Address of the child if not already in self.children_addresses. Defaults to None.
         """
-        self.children_ids[child_name] = child_strategy_id or uuid.uuid1()
+        self.children_ids[child_name] = child_strategy_id or str(uuid.uuid1())
         self.children_update_freq[child_strategy_id] = child_update_freq
         if child_address is not None:
             self.connect_children(child_address)
@@ -273,7 +273,7 @@ class Strategy(event_handler.EventHandler):
         '''
         event_subtype = order.get(c.EVENT_SUBTYPE)
         from_children = (order.get(c.STRATEGY_ID) in self.children_ids.values())
-        from_self = (order.get(c.STRATEGY_ID) == self.strategy_id)
+        from_self = (str(order.get(c.STRATEGY_ID)) == str(self.strategy_id))
 
         if from_children  and event_subtype == c.REQUESTED:
         # receiving a REQUESTED order from one of the children
@@ -286,9 +286,9 @@ class Strategy(event_handler.EventHandler):
         elif from_self:
         # otherwise it is an order resolution. Update positions
             # update the positions that the order came from
-            self.open_positions[order.get(c.POSITION_ID)].handle_event(order)
+            self.open_positions[order.get(c.POSITION_ID)]._handle_event(order)
             # update cash
-            self.cash.handle_event(order)
+            self.cash._handle_event(order)
         
         return self.handle_order(order)
         
@@ -342,6 +342,8 @@ class Strategy(event_handler.EventHandler):
         # Get most recent datapoint
         if (data := self.datas.get(identifier)):
             return data.mark[-1]
+        else:
+            return None
 
     def value_open(self, identifier = None):
         """
@@ -399,7 +401,7 @@ class Strategy(event_handler.EventHandler):
         """
         This is the sum of cash and values of current open positions.
         """
-        nav = sum([position.value_open for symbol, position in self.open_positions.items()])
+        nav = sum([position.value_open for position_id, position in self.open_positions.items()])
         nav += self.cash.value_open
         return nav
     
@@ -417,28 +419,38 @@ class Strategy(event_handler.EventHandler):
     # ----------------------------------------------------------------------------------------------------
     # Action stuff
     # ----------------------------------------------------------------------------------------------------
-    def create_position(self, trade_id = None, position_id = None, asset_type = None, symbol = None):
-        position = Position(self, trade_id, position_id, asset_type, symbol)
+    def create_position(self, symbol, asset_class = c.EQUITY, trade_id = None, position_id = None):
+        position = Position(strategy = self, symbol = symbol, asset_class = asset_class, trade_id = trade_id, position_id = position_id)
+        self.open_positions[position.position_id] = position
         return position
 
-    def create_order(self, order_details, position = None):
-        
+    def create_order(self, symbol, quantity, order_type = c.MARKET, position = None, order_details = {}):
+        '''Note that order does not impact strategy until it is actually placed'''
         if position is None:
             # If there is a position with the symbol already, use the latest one of the positions with the same symbol
-            current_positions_in_symbol = [pos for pos_id, pos in self.open_positions.values() if pos.symbol == order_details[c.SYMBOL]]
+            current_positions_in_symbol = [pos for pos in self.open_positions.values() if pos.symbol == symbol]
             if len(current_positions_in_symbol) > 0:
                 position = current_positions_in_symbol[-1]
             else:
                 # else create a new position
-                position = self.create_position(trade_id = order_details.get(c.TRADE_ID))
+                position = self.create_position(symbol = symbol)
+        elif isinstance(position, dict):
+            # If position details are supplied in a dict, create a new position with those details
+            position = self.create_position(strategy = self, symbol = symbol, **position)
+        elif isinstance(position, Position):
+            pass
+        else:
+            raise Exception('position must be one of {None, dict, gzmo.core.event_handler.position.Position}')
         
         default_order_details = {
             c.STRATEGY_ID: self.strategy_id,
             c.TRADE_ID: position.trade_id,
             c.POSITION_ID: position.position_id,
-            c.ORDER_ID: uuid.uuid1(),
+            c.ORDER_ID: str(uuid.uuid1()),
             c.SYMBOL: position.symbol,
-            c.EVENT_TS: self.clock
+            c.QUANTITY: quantity,
+            c.EVENT_TS: self.clock.timestamp(),
+            c.PRICE: self.get_mark(symbol) or 0.0
             }
         
         return event.order_event({**default_order_details, **order_details})
@@ -453,12 +465,12 @@ class Strategy(event_handler.EventHandler):
         The order must contain position_id to update the corresponding positions.
         '''
 
-        pass_through = (order[c.STRATEGY_ID] != self.strategy_id)
-        assert (position_id := order.get(c.POSITION_ID)) is not None, 'Must provide position_id with order.'
+        pass_through = (str(order[c.STRATEGY_ID]) != str(self.strategy_id))
+        assert (position_id := order.get(c.POSITION_ID)) is not None, 'Order must belong to a position.'
 
         # Update the position with the order
         if not pass_through:
-            self.open_positions[position_id].handle_order(order)
+            self.open_positions[position_id]._handle_order(order)
 
         # place the order
         if self.parent is None:
@@ -590,7 +602,7 @@ class lines(dict):
         if len(self.keys()) == 0:
             return 0
         else:
-            return len(self.values()[0])
+            return len(next(iter(self.values())))
 
     @property
     def include_only(self):

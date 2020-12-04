@@ -11,6 +11,7 @@
 import abc
 import collections
 import datetime
+import uuid
 
 from .. import constants as c
 
@@ -145,7 +146,7 @@ class event:
         order = {
             c.EVENT_TYPE: c.ORDER,
             c.EVENT_SUBTYPE: c.REQUESTED,
-            c.EVENT_TS: datetime.datetime.now(),
+            c.EVENT_TS: datetime.datetime.now().timestamp(),
             c.SYMBOL: None,
             c.ORDER_TYPE: c.MARKET,
             c.PRICE: None,
@@ -157,7 +158,7 @@ class event:
             c.STRATEGY_ID: None,
             c.TRADE_ID: None,
             c.ORDER_ID: None,
-            c.EVENT_ID: None,
+            c.EVENT_ID: str(uuid.uuid1()),
             c.COMMISSION: 0
         }
 
