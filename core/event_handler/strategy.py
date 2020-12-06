@@ -133,13 +133,14 @@ class Strategy(event_handler.EventHandler):
             self.logging_socket = socket
         self.logging_socket.conenct(logging_address)
     
-    def subscribe_to_data(self, topic, track = True, line_args = {'symbol': topic}):
+    def subscribe_to_data(self, topic, track = True, line_args = {}):
         assert self.data_socket is not None, \
             'No data socket to subscribe data from.'
         self.data_socket.setsockopt(zmq.SUBSCRIBE, topic.encode())
         if track:
-            symbol = line_args['symbol']
-            self.datas[symbol] = lines(symbol)
+            if line_args.get('symbol') is None:
+                line_args['symbol'] = topic
+            self.datas[line_args['symbol']] = lines(**line_args)
 
     def add_child(self, symbol, child_strategy_id = None, child_update_freq = datetime.timedelta(seconds = 1), child_address = None):
         """Add a child.
@@ -335,6 +336,40 @@ class Strategy(event_handler.EventHandler):
     # ----------------------------------------------------------------------------------------------------
     # Info things
     # ----------------------------------------------------------------------------------------------------
+    def get(self, identifier):
+        """ `get`s an object from the strategy by the identifier.
+            The identifier could be a property/method name, a symbol with a corresponding lines object,
+            a position, or a trade.
+            If an id is provided, the method will look in the following order: 
+                self.open_trades, self.open_positions, self.closed_trades, self.closed_positions
+
+        Args:
+            identifier (str): The name of the object or an identifier of the object.
+        """
+
+        # Try getting it from datas
+        # First try exact match
+        if key in self.dats.keys():
+            return self.datas[identifier]
+        # Otherwise see if there are lines with names specified with resolution
+        elif (keys := [key for key in self.datas.keys() if identifier in key]) !=  []:
+            # return last added
+            return self.datas[keys[-1]]
+        # Next, try to get from trades and positions
+        elif (trade_or_position := self.open_trades.get(identifier) \
+                                    or self.open_positions.get(identifier) \
+                                    or self.closed_trades.get(identifier) \
+                                    or self.closed_positions.get(identifier)) is not None:
+            return trade_or_position
+        # Otherwise see if there is a property/method with name identifier.
+        else:
+            try:
+                answer = getattr(self, identifier)
+            except AttributeError:
+                raise
+            return answer
+
+
     def get_mark(self, identifier):
         """Get the mark of an asset
 
@@ -566,7 +601,7 @@ class lines(dict):
         
         
     """
-    def __init__(self, symbol, data_type = None, include_only = None, exclude = set(), maxlen = None, mark_line = 'CLOSE'):       
+    def __init__(self, symbol, data_type = None, include_only = None, exclude = set([c.EVENT_TYPE, c.SYMBOL]), maxlen = None, mark_line = 'CLOSE'):       
         
         self.__initialized = False
         self.symbol = symbol
