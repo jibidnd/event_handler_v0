@@ -70,6 +70,52 @@ CASH = 'CASH'
 EQUITY = 'EQUITY'
 # STRATEGY = 'STRATEGY'
 
+'''
+general naming conventions
+# <symbol>[optaional: _<int multiplier>][optional: _<str resolution following ISO 8601 duration>]
+    https://www.cmegroup.com/education/courses/introduction-to-futures/understanding-contract-trading-codes.html
+        - Y: Year
+        - M: Month
+        - W: Week
+        - D: Day
+        - h: hour
+        - m: minute
+        - s: second
+        - ms: millisecond
+        - us: microsecond
+        - ns: nanosecond
+    e.g.
+        - AAPL
+        - AAPL_1_ms
+        - AAPL_m
+
+options naming conventions:
+    https://en.wikipedia.org/wiki/Option_naming_convention
+    Symbol (max. 6 characters)
+    Yr (YY)
+    Mo (MM)
+    Day (DD)
+    Call or Put (C/P)
+    Strike Price (#####.###) listed with five digits before the decimal and three digits following the decimal
+
+futures naming coventions:
+    https://www.cmegroup.com/education/courses/introduction-to-futures/understanding-contract-trading-codes.html
+    <product code><month code><year code>
+        January – F
+        February - G
+        March -H
+        April -J
+        May - K
+        June - M
+        July - N
+        August - Q
+        September -U
+        October - V
+        November -X
+        December -Z
+'''
+
+
 # Strategy / Position attributes
 NET_ASSET_VALUE = 'NET_ASSET_VALUE'
 QUANTITY_OPEN = 'QUANTITY_OPEN'
