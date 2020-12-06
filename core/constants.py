@@ -45,7 +45,7 @@ TICK = 'TICK'
 BAR = 'BAR'
 QUOTE = 'QUOTE'
 SIGNAL = 'SIGNAL'
-# INFO = 'INFO'
+# STRATEGY = 'STRATEGY'
 
 # event_subtype for commands
 INFO = 'INFO'
@@ -68,6 +68,7 @@ MARK = 'MARK'
 ASSET_CLASS = 'ASSET_CLASS'
 CASH = 'CASH'
 EQUITY = 'EQUITY'
+# STRATEGY = 'STRATEGY'
 
 # Strategy / Position attributes
 NET_ASSET_VALUE = 'NET_ASSET_VALUE'
