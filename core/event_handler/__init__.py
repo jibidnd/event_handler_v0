@@ -196,3 +196,18 @@ class event:
         data.update(**dict_data_details)
 
         return data
+    
+    @staticmethod
+    def command_event(dict_command_details = {}):
+        '''
+        Create a data event with default arguments.
+        See constants.py for event_subtypes for data.
+        '''
+        command = {
+            c.EVENT_TYPE: c.COMMAND,
+            c.EVENT_SUBTYPE: c.REQUEST,
+            c.EVENT_TS: datetime.datetime.now()
+        }
+        command.update(**dict_command_details)
+
+        return command
