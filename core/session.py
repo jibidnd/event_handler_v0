@@ -5,7 +5,7 @@ import threading
 
 import zmq
 
-from . import data
+# from . import data
 
 class Session:
     def __init__(self):
@@ -15,11 +15,15 @@ class Session:
         self.zmq_context = zmq.Context()
     
     def run(self):
+
+        # Start brokers
+        self.bob.start()
+
         # Start strategies
         for strategy in self.strategies:
-            strategy.start()
+            strategy.run()
 
-        self.bob.start()
+        
 
         # self.console.is_alive?
 
@@ -41,9 +45,10 @@ class Session:
         # start data
         
 
-    def add_strategies(self, strategy):
+    def add_strategies(self, *strategies):
         '''add strategies to the session'''
-        self.strategies.append(strategy)
+        for strategy in strategies:
+            self.strategies.append(strategy)
     
     def add_datafeed(self, topic, datafeed):
         '''add data feeds'''
@@ -52,3 +57,41 @@ class Session:
     # def kill_strategy(self):
     #     '''Kill a strategy'''
     #     pass
+
+    def kill(self):
+        pass
+
+
+def proxy(address_in, address_out, capture = None, context = None):
+
+    try:
+        context = context or zmq.Context.instance()
+
+        # publisher facing client
+        backend = context.socket(zmq.PUB)
+        backend.bind(address_in)
+
+        # socket facing client
+        frontend = context.socket(zmq.SUB)
+        frontend.bind(address_out)
+        # no filtering here
+        frontend.setsockopt(zmq.SUBSCRIBE, b'')
+
+        # make socket if capture is an address
+        if isinstance(capture, str):
+            try:
+                capture_socket = context.socket(zmq.PUB)
+                capture_socket.bind(capture)
+            except:
+                raise
+        else:
+            capture_socket = capture
+
+        zmq.proxy(frontend, backend, capture_socket)
+    
+    except Exception as exc:
+        print(e)
+    finally:
+        frontend.close()
+        backend.close()
+        context.term()

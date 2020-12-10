@@ -45,6 +45,7 @@ TICK = 'TICK'
 BAR = 'BAR'
 QUOTE = 'QUOTE'
 SIGNAL = 'SIGNAL'
+INFO = 'INFO'
 # STRATEGY = 'STRATEGY'
 
 # event_subtype for commands

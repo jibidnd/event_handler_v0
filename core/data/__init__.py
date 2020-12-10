@@ -15,3 +15,5 @@ def publish(address, topic, datafeed, zmq_context = None):
     # TODO: wait for start request
     for data_event in datafeed:
         socket.send_multipart([msgpack.packb(topic), msgpack.packb(data_event)])
+
+        
