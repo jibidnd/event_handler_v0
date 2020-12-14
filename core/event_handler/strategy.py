@@ -7,6 +7,7 @@ import uuid
 from decimal import Decimal
 import datetime
 import pytz
+import time
 
 import zmq
 import msgpack
@@ -20,7 +21,7 @@ from ... import utils
 class Strategy(event_handler.EventHandler):
     def __init__(self, name = None, zmq_context = None, parent_address = None, children_addresses = None,
                     data_address = None, order_address = None, logging_addresses = None, strategy_address = None,
-                    data_subscriptions = [], params = {}, rms = None, local_tz = 'America/New_York'):
+                    data_subscriptions = None, params = None, rms = None, local_tz = 'America/New_York'):
         # initialization params
         self.name = name
         self.zmq_context = zmq_context or zmq.Context.instance()
@@ -30,7 +31,7 @@ class Strategy(event_handler.EventHandler):
         self.order_address = order_address
         self.logging_addresses = logging_addresses
         self.strategy_address = strategy_address
-        self.params = params
+        self.params = params or dict()
         self.rms = rms or RMS()
 
         # data and record keeping
@@ -41,7 +42,7 @@ class Strategy(event_handler.EventHandler):
         # Otherwise children will only update with marks when prompted by self.to_child
         self.children_update_freq = {}  # strategy_id: datetime.timedelta
         self.datas = {}
-        self.data_subscriptions = data_subscriptions + [self.strategy_id]    # list of topics subscribed to
+        self.data_subscriptions = (data_subscriptions or set()) | {self.strategy_id}   # list of topics subscribed to
         self.cash = CashPosition()
         self.open_trades = {}           # trade_id: [position_ids]
         self.closed_trades = {}         # trade_id: [position_ids]
@@ -110,7 +111,7 @@ class Strategy(event_handler.EventHandler):
             self.data_socket = socket
             # subscribe to data with prefix the strategy's id
         for topic in self.data_subscriptions:
-            self.subscribe_to_data(topic.encode())
+            self.subscribe_to_data(topic)
         self.data_socket.connect(data_address)
         
     def connect_order_socket(self, order_address):
@@ -134,19 +135,42 @@ class Strategy(event_handler.EventHandler):
             self.logging_socket = socket
         self.logging_socket.conenct(logging_address)
     
-    def subscribe_to_data(self, topic, track = True, line_args = {}):
+    def subscribe_to_data(self, topic, track = True, line_args = None, lazy = False):
         '''
-            Topic subscriptions from the data socket
+            Topic subscriptions from the data socket.
+            If `lazy`, store topic and establish lines (if specified), but do not
+                subscribe to data on data socket. This is for when a subscription for
+                data occurs before binding to a socket (e.g. we don't know what socket
+                to bind to yet, like in the case of a session)
         '''
-        assert self.data_socket is not None, \
-            'No data socket to subscribe data from.'
-        self.data_subscriptions += [topic]
-        self.data_socket.setsockopt(zmq.SUBSCRIBE, topic.encode())
-        if track:
-            if line_args.get('symbol') is None:
-                line_args['symbol'] = topic
-            self.datas[line_args['symbol']] = lines(**line_args)
+        if line_args is None:
+            line_args = dict()
 
+        # Keep a record
+        # store topics as strings
+        topic = str(topic)
+        if topic not in self.data_subscriptions:
+            self.data_subscriptions |= set([topic])
+        
+        # establish lines if desired
+        if track:
+            # ignore wildcard subscriptions
+            if topic == '':
+                return
+            else:
+                # what to call this datafeed?
+                if line_args.get('symbol') is None:
+                    line_args['symbol'] = topic
+                    # Create new lines if none exist yet
+                if line_args['symbol'] not in self.datas.keys():
+                    self.datas[line_args['symbol']] = lines(**line_args)
+        
+        # subscribe to data now if not lazy
+        if not lazy:
+            assert self.data_socket is not None, \
+                'No data socket to subscribe data from.'
+            self.data_socket.setsockopt(zmq.SUBSCRIBE, topic.encode())
+        return
 
     def add_child(self, symbol, child_strategy = None, child_strategy_id = None, child_update_freq = datetime.timedelta(seconds = 1), child_address = None):
         """Add a child.
@@ -188,9 +212,14 @@ class Strategy(event_handler.EventHandler):
     # ----------------------------------------------------------------------------------------------------
     # Session stuff
     # ----------------------------------------------------------------------------------------------------
+    
+    def before_start(self):
+        '''Things to be run before start'''
+
     def start(self):
-        '''Initialization'''
-        pass
+        '''Initialization. Things to be run before starting to handle events.'''
+        self.before_start()
+        return
     
     def run(self):
         '''Main event loop. The session should call this.
@@ -206,6 +235,7 @@ class Strategy(event_handler.EventHandler):
                 The logic then resets and loops forever.
         '''   
         # TODO: what if we lag behind in processing? how do we catch up?
+        
         global keep_running
         keep_running = True
 
@@ -247,8 +277,14 @@ class Strategy(event_handler.EventHandler):
                     self.clock = utils.unix2datetime(tempts)
                 self._handle_event(next_event)
 
+    def before_stop(self):
+        '''Prior to exiting. Gives user a chance to wrap things up and exit clean. To be overridden.'''
+        pass
+
     def stop(self):
-        '''Prior to exiting. Gives user a chance to wrap things up and exit clean'''
+        
+        self.before_stop()
+
         global keep_running
         keep_running = False
         return
@@ -350,11 +386,11 @@ class Strategy(event_handler.EventHandler):
     def handle_data(self, event):
         pass
 
-    @abc.abstractmethod
+    # @abc.abstractmethod
     def handle_order(self, order):
         pass
 
-    @abc.abstractmethod
+    # @abc.abstractmethod
     def handle_command(self, command_event):
         pass
 

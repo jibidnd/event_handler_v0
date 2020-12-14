@@ -1,103 +1,103 @@
-import datetime
 import time
-import pytz
-import sys
-import os
-
 import configparser
 
-import snowflake.connector
-from snowflake.connector.converter_null import SnowflakeNoConverterToPython
 import zmq
 import msgpack
 
+import snowflake.connector
+from snowflake.connector.converter_null import SnowflakeNoConverterToPython
+
+from ..data import BaseDataFeed
 from .. import constants as c
 
-class SnowflakeFeed:
+class SnowflakeDataFeed(BaseDataFeed):
 
-    def __init__(self, query, address, auth):
-        
+    def __init__(self, topic, query, auth, zmq_context = None):
+
+        super().__init__(topic, zmq_context)
         self.query = query
-        self.address = address
-        
-        # Get auth
+
+        # Get auth for connecting to snowflake
         # if a path if provided
         if isinstance(auth, str):
             # read the file
-            self.config_path = config_path or os.path.join(os.path.expanduser('~'), 'creds.auth')
             config = configparser.ConfigParser()
-            config.read_file(open(config_path))
-            # Get information
-            user = config.get('snowflake', 'user')
-            password = config.get('snowflake', 'password')
-            account = config.get('snowflake', 'account')
-        elif isinstance(auth, dict):
-            # Get information
-            user = auth['user']
-            password = auth['password']
-            account = auth['account']
+            config.read_file(open(auth))
+            self.auth = config['snowflake']
+        else:
+            self.auth = auth
+    
+    def execute_query(self):
+        
+        # Otherwise auth should be a dictioanry-like object with the following keys
+        # Get information
+        user = self.auth['user']
+        password = self.auth['password']
+        account = self.auth['account']
         
         # connect to snowflake
         # Specify no type conversions to preserve precision
         self.con = snowflake.connector.connect(
             user = user,
             password = password,
-            account = account,
+            account = account, 
             converter_class = SnowflakeNoConverterToPython
         )
-        # return results as dictionary
+        # request results to be returned as dictionaries
         self.cur = self.con.cursor(snowflake.connector.DictCursor)
 
-        # Connect to a port
-        self.context = zmq.Context.instance()
-        self.sock = context.socket(zmq.PUB)
-        self.sock.bind(address)
+        self.cur.execute(self.query)
 
-    def run(self):
-        cur.execute(query)
+
+    def run(self, limit = None):
+        # TODO: syncinc
+        self.execute_query()
 
         # stopping event
         tempts = 0
         stopping_event = {c.EVENT_TS: -1, c.EVENT_TYPE: c.DATA, c.EVENT_SUBTYPE: c.INFO}
-    
-        while True:
-            res = cur.fetchone()
+
+        send_more = True
+        rows_sent = 0
+
+        while send_more:
+
+            res = self.cur.fetchone()
+            # print(res)
 
             if res is not None:
-                # repackage the event
-                res[c.EVENT_TS] = float(res.pop('TIMESTAMP')) / 1000.0  # convert to seconds
-                res[c.EVENT_TYPE] = 'DATA'
-                res[c.SYMBOL] = res.pop('TICKER')
                 # msgpack
                 res_packed = msgpack.packb(res, use_bin_type = True, default = self.default_conversion)
                 tempts = res[c.EVENT_TS]
-                # send the event with the symbol as topic
+                # send the event with a topic
                 try:
-                    sock.send_multipart([res[c.SYMBOL].encode(), res_packed], flag = zmq.NOBLOCK)
+                    self.sock_out.send_multipart([self.topic.encode(), res_packed], flag = zmq.NOBLOCK)
+                    rows_sent += 1
+                    
+                    # Stopping flag
+                    if limit is None:
+                        pass
+                    elif rows_sent >= limit:
+                        send_more = False
+                    
                 except zmq.ZMQError as exc:
                     if exc.errno == zmq.EAGAIN:
                         # Drop messages if queue is full
                         pass
                     else:
-                        
                         # sock.send_multipart([b'', msgpack.packb(stopping_event, use_bin_type = True, default = self.default_conversion)])
                         context.destroy()
                         raise
             else:
                 # wait a second before we kill this off
+                # TODO: what if there are multiple datafeeds?
                 time.sleep(1)
-                stopping_event.update(c.EVENT_TS: tempts)
-                stopping_event = msgpack.packb(stopping_event, use_bin_type = True, default = default_conversion)
-                sock.send_multipart([b'', stopping_event])
-                context.destroy()
+                self.is_finished = True
+                # stopping_event.update({c.EVENT_TS: tempts})
+                # stopping_event = msgpack.packb(stopping_event, use_bin_type = True, default = self.default_conversion)
+                # self.sock_out.send_multipart([b'', stopping_event])
+                self.sock_out.close()
                 break
-    
-    @staticmethod
-    def default_conversion(obj):
-        try:
-            return float(obj)
-        except:
-            return str(obj)
-
-
+        
+        self.sock_out.close()
 

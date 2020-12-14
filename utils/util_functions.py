@@ -112,3 +112,28 @@ def _str_to_fn(self, fn_as_str):
     path, _, function = fn_as_str.rpartition('.')
     module = importlib.import_module(path)
     return getattr(module, function)
+
+
+import socket
+# Getting a random free tcp port in python using sockets
+def get_free_tcp_address(port = 1234, max_port = 1300, exclude = None):
+    exclude = exclude or []
+    while port <= max_port:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(('', port))
+            host, free_port = sock.getsockname()
+            
+            address = f'tcp://{host}:{free_port}'
+            if (address not in exclude):
+                sock.close()
+                return address, host, free_port
+            else:
+                port += 1
+                sock.close()
+        except OSError as exc:
+            sock.close()
+            port += 1
+        except:
+            raise
+    raise IOError('No free ports.')

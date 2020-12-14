@@ -2,38 +2,66 @@
 A session coordinates instances of events, brokers, and strategies.
 '''
 import threading
-
+import socket
+import time
 import zmq
+
+from ..utils.util_functions import get_free_tcp_address
 
 # from . import data
 
 class Session:
     def __init__(self):
         self.strategies = []    # Strategy instances
-        self.datafeeds = []     # tuple(topic, datafeed generator)
+        self.strategy_threads = []
+        self.datafeeds = []     # datafeed instances, must have method "run"
+        self.datafeed_threads = []
         self.data_address = None   
         self.zmq_context = zmq.Context()
+
+        # datafeed proxy params
+        self.datafeed_address_in = None    # datafeeds publish to this address
+        self.datafeed_address_out = None   # strategies subscribe to this address for datafeeds
+        self.datafeed_capture = None
+
+        self.main_shutdown_flag = threading.Event()
     
     def run(self):
 
-        # Start brokers
-        self.bob.start()
+        # # Start brokers
+        # self.bob.start()
+
+        # # self.console.is_alive?
+
+        # Find ports that are available
+        # TODO: take care of race conditions where someone else grabs that port in between us finding it and binding to it
+        self.datafeed_address_in, host_in, port_in = get_free_tcp_address()
+        self.datafeed_address_out, host_out, port_out = get_free_tcp_address(exclude = (self.datafeed_address_in,))   # want to avoid taking datafeed_address_in (it is "free" right now)
+
+        # Start proxy to relay datafeeds
+        self.proxy_thread = threading.Thread(target = proxy, args = (self.datafeed_address_in, self.datafeed_address_out, self.datafeed_capture, self.zmq_context, self.main_shutdown_flag))
+        self.proxy_thread.start()
 
         # Start strategies
         for strategy in self.strategies:
-            strategy.run()
-
-        
-
-        # self.console.is_alive?
+            strategy.connect_data_socket(self.datafeed_address_out)
+            strategy_thread = threading.Thread(target = strategy.run)
+            strategy_thread.daemon = True
+            self.strategy_threads.append(strategy_thread)
+            strategy_thread.start()
 
         # Start datafeeds
-        datafeed_threads = []
-        for topic, datafeed in self.datafeeds:
-            datafeed_threads.append(threading.Thread(target = data.publish, args = (self.data_address, topic, datafeed, zmq_context)), daemon = True)
+        for datafeed in self.datafeeds:
+            datafeed.publish_to(self.datafeed_address_in)
+            datafeed_thread = threading.Thread(target = datafeed.run)
+            datafeed_thread.daemon = True
+            self.datafeed_threads.append(datafeed_thread)
 
-        for data_thread in datafeed_threads:
+        for data_thread in self.datafeed_threads:
             data_thread.start()
+        
+        # do something else
+        print('Doing something else...')
             
 
         # TODO
@@ -43,55 +71,61 @@ class Session:
         # start bob and make sure it is running
         # ping console
         # start data
+
+        self.zmq_context.destroy()
+        # time.sleep(10)
         
 
-    def add_strategies(self, *strategies):
+    def add_strategy(self, strategy):
         '''add strategies to the session'''
-        for strategy in strategies:
-            self.strategies.append(strategy)
+        self.strategies.append(strategy)
     
-    def add_datafeed(self, topic, datafeed):
+    def add_datafeed(self, datafeed):
         '''add data feeds'''
-        self.datafeeds.append((topic, datafeed))
+        self.datafeeds.append(datafeed)
 
     # def kill_strategy(self):
     #     '''Kill a strategy'''
     #     pass
 
     def kill(self):
-        pass
+        # exiting gracefully
+
+        for datafeed_thread in self.datafeed_threads:
+            if datafeed_thread.is_alive():
+                datafeed_thread.shutdown_flag.set()
+                datafeed_thread.join()
+        self.zmq_context.destroy()
 
 
-def proxy(address_in, address_out, capture = None, context = None):
+def proxy(address_in, address_out, capture = None, context = None, shutdown_flag = None):
+    '''
+        Relays messages from backend (address_in) to frontend (address_out),
+        so strategies can have one central place to subscribe data from.
 
-    try:
-        context = context or zmq.Context.instance()
+        Note that we are binding on the subscriber end because we have a
+        multiple publisher (datafeeds) - one subscriber (session) pattern
+    '''
 
-        # publisher facing client
-        backend = context.socket(zmq.PUB)
-        backend.bind(address_in)
+    # try:
+    context = context or zmq.Context.instance()
 
-        # socket facing client
-        frontend = context.socket(zmq.SUB)
-        frontend.bind(address_out)
-        # no filtering here
-        frontend.setsockopt(zmq.SUBSCRIBE, b'')
+    # publisher facing socket
+    backend = context.socket(zmq.SUB)
+    backend.bind(address_in)
+    # no filtering here
+    backend.setsockopt(zmq.SUBSCRIBE, b'')
 
-        # make socket if capture is an address
-        if isinstance(capture, str):
-            try:
-                capture_socket = context.socket(zmq.PUB)
-                capture_socket.bind(capture)
-            except:
-                raise
-        else:
-            capture_socket = capture
-
-        zmq.proxy(frontend, backend, capture_socket)
+    # client facing socket
+    frontend = context.socket(zmq.PUB)
+    frontend.bind(address_out)
     
-    except Exception as exc:
-        print(e)
-    finally:
-        frontend.close()
-        backend.close()
-        context.term()
+    if capture:
+        # bind to capture address
+        capture_socket = context.socket(zmq.PUB)
+        capture_socket.bind(capture)
+    else:
+        capture_socket = None
+
+    zmq.proxy(frontend, backend, capture_socket)
+
