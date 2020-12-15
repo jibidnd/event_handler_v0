@@ -256,6 +256,12 @@ class Strategy(event_handler.EventHandler):
                         # Attempt to receive from each socket, but do not block
                         if socket.socket_type in [zmq.SUB, zmq.ROUTER]:
                             topic, event = socket.recv_multipart(zmq.NOBLOCK)
+                            # msg = socket.recv_multipart(zmq.NOBLOCK)
+                            # try:
+                            #     topic, event = msg
+                            # except:
+                            #     print(msgpack.unpackb(msg[0]))
+                            #     raise
                         elif socket.socket_type in [zmq.DEALER]:
                             event = socket.recv(zmq.NOBLOCK)
                         self.next_events[name] = msgpack.unpackb(event)

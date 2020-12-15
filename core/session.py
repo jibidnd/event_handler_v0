@@ -53,7 +53,7 @@ class Session:
         # Start datafeeds
         for datafeed in self.datafeeds:
             datafeed.publish_to(self.datafeed_address_in)
-            datafeed_thread = threading.Thread(target = datafeed.run)
+            datafeed_thread = threading.Thread(target = datafeed.publish)   # datafeeds can be unsynchronized
             datafeed_thread.daemon = True
             self.datafeed_threads.append(datafeed_thread)
 
@@ -72,7 +72,7 @@ class Session:
         # ping console
         # start data
 
-        self.zmq_context.destroy()
+        # self.zmq_context.destroy()
         # time.sleep(10)
         
 
@@ -106,15 +106,16 @@ def proxy(address_in, address_out, capture = None, context = None, shutdown_flag
         Note that we are binding on the subscriber end because we have a
         multiple publisher (datafeeds) - one subscriber (session) pattern
     '''
-
     # try:
     context = context or zmq.Context.instance()
 
     # publisher facing socket
     backend = context.socket(zmq.SUB)
-    backend.bind(address_in)
     # no filtering here
     backend.setsockopt(zmq.SUBSCRIBE, b'')
+    backend.bind(address_in)
+    
+    
 
     # client facing socket
     frontend = context.socket(zmq.PUB)

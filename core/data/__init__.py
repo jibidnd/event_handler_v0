@@ -11,7 +11,9 @@ class BaseDataFeed:
 
         self.topic = topic
         self.zmq_context = zmq_context or zmq.Context.instance()
+        self.from_beginning = True
         self.is_finished = False
+        self.shutdown_flag = False
 
     def publish_to(self, address):
         self.address = address
@@ -23,7 +25,11 @@ class BaseDataFeed:
         self.sock_out.connect(address)
 
     @abc.abstractmethod
-    def run(self):
+    def publish(self):
+        pass
+    
+    @abc.abstractmethod
+    def fetch(self, limit = None):
         pass
 
     @staticmethod
