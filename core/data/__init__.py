@@ -1,6 +1,7 @@
 import abc
 import zmq
 import msgpack
+import threading
 
 from .. import constants as c
 from ...utils.util_functions import get_free_tcp_address
@@ -13,7 +14,7 @@ class BaseDataFeed:
         self.zmq_context = zmq_context or zmq.Context.instance()
         self.from_beginning = True
         self.is_finished = False
-        self.shutdown_flag = False
+        self.shutdown_flag = threading.Event()
 
     def publish_to(self, address):
         self.address = address

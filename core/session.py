@@ -52,29 +52,23 @@ class Session:
 
         # Start datafeeds
         for datafeed in self.datafeeds:
+            # Tell the feeds where to publish to
             datafeed.publish_to(self.datafeed_address_in)
-            datafeed_thread = threading.Thread(target = datafeed.publish)   # datafeeds can be unsynchronized
+            # set the shutdown flag
+            datafeed.shutdown_flag = self.main_shutdown_flag
+            datafeed_thread = threading.Thread(target = datafeed.publish)
             datafeed_thread.daemon = True
             self.datafeed_threads.append(datafeed_thread)
 
         for data_thread in self.datafeed_threads:
             data_thread.start()
-        
-        # do something else
-        print('Doing something else...')
-            
 
-        # TODO
-        # What to do?
+        # wait for datafeeds to finish
+        for data_thread in self.datafeed_threads:
+            data_thread.join()
 
-        # start all strategies and make sure they're running
-        # start bob and make sure it is running
-        # ping console
-        # start data
-
-        # self.zmq_context.destroy()
-        # time.sleep(10)
-        
+        # exit gracefully
+        self.shutdown()
 
     def add_strategy(self, strategy):
         '''add strategies to the session'''
@@ -88,14 +82,21 @@ class Session:
     #     '''Kill a strategy'''
     #     pass
 
-    def kill(self):
+    def shutdown(self):
         # exiting gracefully
+        self.main_shutdown_flag.set()
 
-        for datafeed_thread in self.datafeed_threads:
-            if datafeed_thread.is_alive():
-                datafeed_thread.shutdown_flag.set()
-                datafeed_thread.join()
-        self.zmq_context.destroy()
+        # tell strategies to stop
+        for strategy in self.strategies:
+            strategy.stop()
+        
+        # wait for the strategies to exit clean
+        for strategy_thread in self.strategy_threads:
+            strategy_thread.join()
+
+        # wait a second before terminating the context
+        time.sleep(1)
+        self.zmq_context.term()
 
 
 def proxy(address_in, address_out, capture = None, context = None, shutdown_flag = None):
@@ -128,5 +129,14 @@ def proxy(address_in, address_out, capture = None, context = None, shutdown_flag
     else:
         capture_socket = None
 
-    zmq.proxy(frontend, backend, capture_socket)
+    try:
+        zmq.proxy(frontend, backend, capture_socket)
+    except zmq.ContextTerminated:
+        backend.close(linger = 10)
+        frontend.close(linger = 10)
+    
+    # exit gracefully
+    if shutdown_flag:
+        backend.close(linger = 10)
+        frontend.close(linger = 10)
 

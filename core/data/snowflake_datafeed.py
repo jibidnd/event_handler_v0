@@ -47,20 +47,26 @@ class SnowflakeDataFeed(BaseDataFeed):
 
         self.cur.execute(self.query)
 
-    def get(self, limit = None):
-
+    def fetch(self, limit = None):
         # if starting over
         if self.from_beginning:
             self.execute_query()
+            self.from_beginning = False
         
         if limit is None:
             res = self.cur.fetchall()
-            res_with_topic = [(self.topic, res_i) for res_i in res]
-            return res_with_topic
         else:
             res = self.cur.fetchmany(limit)
-            res_with_topic = [(self.topic, res_i) for res_i in res]
+        
+        # add topic to results
+        res_with_topic = [(self.topic, res_i) for res_i in res]
+
+        # set flag if nothing else to get
+        if len(res_with_topic) == 0:
+            self.is_finished = True
             return res_with_topic
+        
+        return res_with_topic
 
     def publish(self):
         # TODO: sync to start
@@ -68,18 +74,14 @@ class SnowflakeDataFeed(BaseDataFeed):
         # if starting over
         if self.from_beginning:
             self.execute_query()
+            self.from_beginning = False
 
-        # stopping event
-        # tempts = 0
-        # stopping_event = {c.EVENT_TS: -1, c.EVENT_TYPE: c.DATA, c.EVENT_SUBTYPE: c.INFO}
-
-        # send_more = True
-        # rows_sent = 0
-
-        while (not self.shutdown_flag) & (not self.is_finished):
-
+        # Keeping going?
+        while (not self.shutdown_flag.is_set()) & (not self.is_finished):
+            
+            # get one row of result everytime
+            # maybe slower but won't have to worry about size of results
             res = self.cur.fetchone()
-            # print(res)
 
             if res is not None:
                 # msgpack
@@ -88,26 +90,22 @@ class SnowflakeDataFeed(BaseDataFeed):
                 # send the event with a topic
                 try:
                     self.sock_out.send_multipart([self.topic.encode(), res_packed], flag = zmq.NOBLOCK)
-                    
                 except zmq.ZMQError as exc:
                     if exc.errno == zmq.EAGAIN:
                         # Drop messages if queue is full
                         pass
                     else:
+                        self.shutdown_flag.set()
                         # sock.send_multipart([b'', msgpack.packb(stopping_event, use_bin_type = True, default = self.default_conversion)])
-                        self.sock_out.close()
+                        self.sock_out.close(linger = 10)
                         raise
             else:
-                # wait a second before we kill this off
-                # TODO: what if there are multiple datafeeds?
-                time.sleep(1)
+                # no more results
                 self.is_finished = True
-                self.shutdown_flag = True
+                self.shutdown_flag.set()
                 # stopping_event.update({c.EVENT_TS: tempts})
                 # stopping_event = msgpack.packb(stopping_event, use_bin_type = True, default = self.default_conversion)
                 # self.sock_out.send_multipart([b'', stopping_event])
-                self.sock_out.close()
+                self.sock_out.close(linger = 10)
                 break
-        
-        self.sock_out.close()
 
