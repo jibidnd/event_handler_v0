@@ -151,14 +151,17 @@ class event:
             c.ORDER_TYPE: c.MARKET,
             c.PRICE: None,
             c.QUANTITY: None,
-            c.CREDIT: None,
-            c.DEBIT: None,
-            c.NET: None,
-            c.BROKER: None,
             c.STRATEGY_ID: None,
             c.TRADE_ID: None,
             c.ORDER_ID: None,
             c.EVENT_ID: str(uuid.uuid1()),
+            # order fill information
+            c.QUANTITY_OPEN: 0,
+            c.QUANTITY_FILLED: 0,
+            c.CREDIT: 0,
+            c.DEBIT: 0,
+            c.NET: 0,
+            c.BROKER: None,
             c.COMMISSION: 0
         }
 
@@ -211,3 +214,90 @@ class event:
         command.update(**dict_command_details)
 
         return command
+
+class lines(dict):
+    """
+    A lines object is a collection of time series (deques) belonging to one asset (symbol).
+    
+    The lines object will keep track of fields from data events, as specified in the __init__
+        method. `include_only` and `exclude` cannot be modified after initialization to keep
+        all deques in sync.
+    If `include_only` is None (default), the first data event will determine what
+        fields are tracked.
+
+    Args:
+        data_type (str): The type of data (e.g. TICK, BAR, QUOTE, SIGNAL, STRATEGY). For reference only.
+        symbol (str): An identifier for the underlying data. For reference only.
+        include_only (None or set, optional): Only track these fields in a data event. 
+            If None, track all fields of a given data event (if data has new fields, track those too).
+            Cannot be modified after initialization. Defaults to None.
+        exclude (None or set, optional): Do not track these fields in a data event.
+            If include_only and exclude specify the same field, exclude takes precedence. 
+            Cannot be modified after initialization. Defaults to None.
+        
+        
+    """
+    def __init__(self, symbol, data_type = None, include_only = None, exclude = set([c.EVENT_TYPE, c.SYMBOL]), maxlen = None, mark_line = 'CLOSE'):       
+        
+        self.__initialized = False
+        self.symbol = symbol
+        self.data_type = data_type
+        self.include_only = include_only
+        self.exclude = exclude
+        self.mark_line = mark_line
+
+        # Keep a tab on what's tracked
+        if include_only is not None:
+            self._tracked = include_only - exclude
+            for line in self._tracked:
+                self[line] = collections.deque(maxlen = maxlen)
+        else:
+            self._tracked = None
+        
+        self.__initialized = True
+
+    def update_with_data(self, data):
+        # find out what should be tracked if we don't know yet  
+        if self._tracked is None:
+            if self.include_only is None:
+                self._tracked = set(data.keys()) - self.exclude
+            else:
+                self._tracked = self.include_only - self.exclude
+            
+            # Create a deque for each tracked field  
+            self.update({line: collections.deque() for line in self._tracked})
+
+        for line in self._tracked:
+            self[line].append(data.get(line))
+
+    @property
+    def mark(self):
+        return self.get(self.mark_line)
+    
+    def __len__(self):
+        if len(self.keys()) == 0:
+            return 0
+        else:
+            return len(next(iter(self.values())))
+
+    @property
+    def include_only(self):
+        return self._include_only
+    
+    @include_only.setter
+    def include_only(self, include_only):
+        if (self.__initialized) and (len(self.keys()) > 0):
+            raise Exception('Cannot modify attribute after initialization.')
+        else:
+            self._include_only = include_only
+
+    @property
+    def exclude(self):
+        return self._exclude
+
+    @exclude.setter
+    def exclude(self, exclude):
+        if self.__initialized:
+            raise Exception('Cannot modify attribute after initialization.')
+        else:
+            self._exclude = exclude

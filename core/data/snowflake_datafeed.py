@@ -91,21 +91,29 @@ class SnowflakeDataFeed(BaseDataFeed):
                 try:
                     self.sock_out.send_multipart([self.topic.encode(), res_packed], flag = zmq.NOBLOCK)
                 except zmq.ZMQError as exc:
+                    # Drop messages if queue is full
                     if exc.errno == zmq.EAGAIN:
-                        # Drop messages if queue is full
                         pass
                     else:
-                        self.shutdown_flag.set()
+                        # unexpected error: shutdown and raise
+                        self.shutdown()
                         # sock.send_multipart([b'', msgpack.packb(stopping_event, use_bin_type = True, default = self.default_conversion)])
-                        self.sock_out.close(linger = 10)
                         raise
+                except zmq.ContextTerminated:
+                    # context is being closed by session
+                    self.shutdown()
+                except:
+                    raise
             else:
                 # no more results
                 self.is_finished = True
-                self.shutdown_flag.set()
+                self.shutdown()
+
                 # stopping_event.update({c.EVENT_TS: tempts})
                 # stopping_event = msgpack.packb(stopping_event, use_bin_type = True, default = self.default_conversion)
                 # self.sock_out.send_multipart([b'', stopping_event])
-                self.sock_out.close(linger = 10)
                 break
-
+    
+    def shutdown(self):
+        self.shutdown_flag.set()
+        self.sock_out.close(linger = 10)

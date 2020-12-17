@@ -56,15 +56,17 @@ class DatafeedSynchronizer(BaseDataFeed):
                         self.sock_out.send_multipart([event[0].encode(), event_packed], flag = zmq.NOBLOCK)
                     
                     except zmq.ZMQError as exc:
+                        # Drop messages if queue is full
                         if exc.errno == zmq.EAGAIN:
-                            # Drop messages if queue is full
                             pass
                         else:
-                            self.sock_out.close(linger = 10)
+                            self.shutdown()
                             raise
             else:
                 self.is_finished = True
-                self.shutdown_flag = True
-                self.sock_out.close(linger = 10)
+                self.shutdown()
                 break
 
+    def shutdown(self):
+        self.shutdown_flag.set()
+        self.sock_out,.close(linger = 10)
