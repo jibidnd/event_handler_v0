@@ -13,7 +13,10 @@ class BaseDataFeed:
         self.topic = topic
         self.zmq_context = zmq_context or zmq.Context.instance()
         self.from_beginning = True
+        self.start_sync = threading.Event(); self.start_sync.set()  # default to not block for a sync
         self.is_finished = False
+        # main_shutdown_flag is intended to be set by the main thread, if used in a threading context
+        self.main_shutdown_flag = threading.Event()
         self.shutdown_flag = threading.Event()
 
     def publish_to(self, address):

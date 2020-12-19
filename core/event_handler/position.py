@@ -128,7 +128,7 @@ class CashPosition(event_handler.EventHandler):
     def __init__(self):
         self.balance = 0
         self.net_flow = 0    # the net deposit/withdrawals to this cash position
-        # self.value_pending = 0
+        self.value_pending = 0
         self.transactions = collections.deque(maxlen = None)
     
     def _handle_data(self, data):

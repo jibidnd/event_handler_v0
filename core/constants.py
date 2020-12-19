@@ -29,6 +29,7 @@ FILLED = 'FILLED'               # order is filled (complete or partial)
 EXPIRED = 'EXPIRED'             # order is expired
 CANCELLED = 'CANCELLED'         # order has been cancelled
 REJECTED = 'REJECTED'           # order is rejected
+INVALID = 'INVALID'
 
 # Order types
 MARKET = 'MARKET'
@@ -47,6 +48,10 @@ QUOTE = 'QUOTE'
 SIGNAL = 'SIGNAL'
 INFO = 'INFO'
 # STRATEGY = 'STRATEGY'
+
+# Bar attributes
+MULTIPLIER = 'MULTIPLIER'
+RESOLUTION = 'RESOLUTION'
 
 # event_subtype for commands
 INFO = 'INFO'
@@ -133,6 +138,7 @@ TRADE_ID = 'TRADE_ID'
 POSITION_ID = 'POSITION_ID'
 ORDER_ID = 'ORDER_ID'
 EVENT_ID = 'EVENT_ID'
+SENDER_ID = 'SENDER_ID'
 # Order keys
 SYMBOL = 'SYMBOL'
 ORDER_TYPE = 'ORDER_TYPE'

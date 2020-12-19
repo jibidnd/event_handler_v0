@@ -137,3 +137,50 @@ def get_free_tcp_address(port = 1234, max_port = 1300, exclude = None):
         except:
             raise
     raise IOError('No free ports.')
+
+
+def duration_to_sec(duration):
+    '''
+        Resolution following ISO 8601 duration
+        https://www.cmegroup.com/education/courses/introduction-to-futures/understanding-contract-trading-codes.html
+            - Y: Year
+            - M: Month
+            - W: Week
+            - D: Day
+            - h: hour
+            - m: minute
+            - s: second
+            - ms: millisecond
+            - us: microsecond
+            - ns: nanosecond
+        
+        Durations over weeks are not exact.
+    '''
+    duration = str(duration)
+    if duration == 'ns':
+        return 10.0e-9
+    elif duration == 'us':
+        return 10.0e-6
+    elif duration == 'ms':
+        return 10.0e-3
+    elif duration == 's':
+        return 1.0
+    elif duration == 'm':
+        return 60.0
+    elif duration == 'h':
+        return 60.0 * 60.0
+    elif duraiton == 'D':
+        return 60.0 * 60.0 * 24.0
+    elif duration == 'W':
+        return 60.0 * 60.0 * 24.0 * 7
+    elif duration == 'M':
+        return 60.0 * 60.0 * 24.0 * 7 * 30.25
+    elif duration == 'Y':
+        return 60.0 * 60.0 * 24.0 * 7 * 365.25
+
+
+def default_conversion(obj):
+    try:
+        return float(obj)
+    except:
+        return str(obj)

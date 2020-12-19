@@ -77,8 +77,13 @@ class SnowflakeDataFeed(BaseDataFeed):
             self.from_beginning = False
 
         # Keeping going?
-        while (not self.shutdown_flag.is_set()) & (not self.is_finished):
+        while (not self.main_shutdown_flag.is_set()) and \
+                (not self.shutdown_flag.is_set()) and \
+                (not self.is_finished):
             
+            # wait for the starting signal
+            self.start_sync.wait()
+
             # get one row of result everytime
             # maybe slower but won't have to worry about size of results
             res = self.cur.fetchone()

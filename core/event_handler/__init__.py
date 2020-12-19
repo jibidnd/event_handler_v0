@@ -55,7 +55,7 @@ class EventHandler(abc.ABC):
         '''Handle an order event.'''
         return
 
-    @abc.abstractmethod
+    # @abc.abstractmethod
     def _handle_command(self, command_event):
         return
     
@@ -156,8 +156,8 @@ class event:
             c.ORDER_ID: None,
             c.EVENT_ID: str(uuid.uuid1()),
             # order fill information
-            c.QUANTITY_OPEN: 0,
-            c.QUANTITY_FILLED: 0,
+            c.QUANTITY_OPEN: None,
+            c.QUANTITY_FILLED: None,
             c.CREDIT: 0,
             c.DEBIT: 0,
             c.NET: 0,

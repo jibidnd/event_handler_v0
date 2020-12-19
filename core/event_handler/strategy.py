@@ -50,8 +50,6 @@ class Strategy(event_handler.EventHandler):
         self.closed_positions = {}      # position_id: position object
         # TODO
         self.pending_orders = {}        # orders not yet filled: order_id: order_event
-        # The event "queue"
-        self.next_events = {}
 
         # Keeping track of time: internally, time will be tracked as local time
         # For communication, (float) timestamps on the second resolution @ UTC will be used.
@@ -225,11 +223,11 @@ class Strategy(event_handler.EventHandler):
         '''Main event loop. The session should call this.
         
             At any time, the strategy will have visibility of the next event from each socket:
-                Data, order, parent, children; as stored in self.next_events.
+                Data, order, parent, children; as stored in next_events.
                 If any of these slots are empty, the strategy will make 1 attempt to receive data
                 from the corresponding sockets.
             
-                Then, the events in self.next_events will be sorted by event_ts, and the very next
+                Then, the events in next_events will be sorted by event_ts, and the very next
                 event will be handled.
 
                 The logic then resets and loops forever.
@@ -239,11 +237,14 @@ class Strategy(event_handler.EventHandler):
         global keep_running
         keep_running = True
 
-        # start the children strategies, if any
-        if self.children is not None:
-            self.to_child('', 'start')
+        # # start the children strategies, if any
+        # if self.children is not None:
+        #     self.to_child('', 'start')
         # start the strategy
         self.start()
+
+        # the event 'queue'
+        next_events = {}
 
         while keep_running:
 
@@ -251,16 +252,14 @@ class Strategy(event_handler.EventHandler):
             for name, socket in zip([c.DATA_SOCKET, c.ORDER_SOCKET, c.PARENT_SOCKET, c.CHILDREN_SOCKET],
                                     [self.data_socket, self.order_socket, self.parent, self.children]):
                 if socket is None: continue
-                if self.next_events.get(name) is None:
+                if next_events.get(name) is None:
                     try:
                         # Attempt to receive from each socket, but do not block
                         if socket.socket_type in [zmq.SUB, zmq.ROUTER]:
                             topic, event = socket.recv_multipart(zmq.NOBLOCK)
-                            msg = socket.recv_multipart(zmq.NOBLOCK)
-                            topic, event = msg
                         elif socket.socket_type in [zmq.DEALER]:
                             event = socket.recv(zmq.NOBLOCK)
-                        self.next_events[name] = msgpack.unpackb(event)
+                        next_events[name] = msgpack.unpackb(event)
                     except zmq.ZMQError as exc:
                         if exc.errno == zmq.EAGAIN:
                             pass
@@ -268,12 +267,13 @@ class Strategy(event_handler.EventHandler):
                             raise
                 
             # Now we can sort the upcoming events and handle the next event
-            if len(self.next_events) > 0:
+            if len(next_events) > 0:
                 # Run code that needs to be executed bofore handling any event            
                 self._prenext()
                 # Handle the socket with the next soonest event (by EVENT_TS)
-                next_socket = sorted(self.next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
-                next_event = self.next_events.pop(next_socket)        # remove the event from self.next_events
+                # take the first item (socket name) of the first item ((name, event)) of the sorted queue
+                next_socket = sorted(next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
+                next_event = next_events.pop(next_socket)        # remove the event from next_events
                 # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
                 if (tempts := next_event[c.EVENT_TS]) > self.clock.timestamp():
                     self.clock = utils.unix2datetime(tempts)
@@ -587,7 +587,8 @@ class Strategy(event_handler.EventHandler):
             c.SYMBOL: position.symbol,
             c.QUANTITY: quantity,
             c.EVENT_TS: self.clock.timestamp(),
-            c.PRICE: self.get_mark(symbol) or 0.0
+            c.PRICE: self.get_mark(symbol) or 0.0,
+            c.QUANTITY_OPEN: quantity
             }
         
         return event.order_event({**default_order_details, **order_details})
@@ -621,7 +622,7 @@ class Strategy(event_handler.EventHandler):
         Send the denial to the child.
         '''
         order = order.update(event_subtype = c.DENIED)
-        self.children.send_multipart(order[c.STRATEGY_ID], order)
+        self.children.send_multipart([order[c.STRATEGY_ID], order])
 
     def liquidate(self, id_or_symbol = None, order_details = {c.ORDER_TYPE: c.MARKET}):
         """Liquidate a trade, position, or positions on the specified symbol.

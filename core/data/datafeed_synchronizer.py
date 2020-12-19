@@ -32,7 +32,9 @@ class DatafeedSynchronizer(BaseDataFeed):
         for datafeed in self.datafeeds:
             datafeed.from_beginning = True
 
-        while (not self.shutdown_flag.is_set()) & (not self.is_finished):
+        while (not self.main_shutdown_flag.is_set()) and \
+                (not self.shutdown_flag.is_set()) and \
+                (not self.is_finished):
 
             # A mapping to keep track of datafeeds
             dict_datafeeds = {i: datafeed for i, datafeed in enumerate(self.datafeeds)}
@@ -41,9 +43,10 @@ class DatafeedSynchronizer(BaseDataFeed):
             for i, datafeed in dict_datafeeds.items():
                 # Attempt to fill the event queue for any slots that are empty
                 if (not datafeed.is_finished) and (dict_events.get(i) is None):
-                    res = datafeed.fetch(1)[0]
+                    res = datafeed.fetch(1)
                     # if nonempty results
                     if len(res) > 0:
+                        res = res[0]
                         dict_events[i] = res
             # anything to publish?
             if len(dict_events) > 0:
@@ -69,4 +72,4 @@ class DatafeedSynchronizer(BaseDataFeed):
 
     def shutdown(self):
         self.shutdown_flag.set()
-        self.sock_out,.close(linger = 10)
+        self.sock_out.close(linger = 10)
