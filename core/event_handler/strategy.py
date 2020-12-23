@@ -272,7 +272,7 @@ class Strategy(event_handler.EventHandler):
                 # Run code that needs to be executed bofore handling any event            
                 self._prenext()
                 # Handle the socket with the next soonest event (by EVENT_TS)
-                # take the first item (socket name) of the first item ((name, event)) of the sorted queue
+                # take the first item (socket name) of the first item ((socket name, event)) of the sorted queue
                 next_socket = sorted(next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
                 next_event = next_events.pop(next_socket)        # remove the event from next_events
                 # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)

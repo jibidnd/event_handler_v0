@@ -47,11 +47,12 @@ class SnowflakeDataFeed(BaseDataFeed):
 
         self.cur.execute(self.query)
 
+        self.from_beginning = False
+
     def fetch(self, limit = 1):
         # if starting over
         if self.from_beginning:
             self.execute_query()
-            self.from_beginning = False
         
         if limit is None:
             res = self.cur.fetchall()
@@ -73,7 +74,6 @@ class SnowflakeDataFeed(BaseDataFeed):
         # if starting over
         if self.from_beginning:
             self.execute_query()
-            self.from_beginning = False
 
         # Keeping going?
         while (not self.main_shutdown_flag.is_set()) and \
@@ -117,6 +117,9 @@ class SnowflakeDataFeed(BaseDataFeed):
                 # stopping_event = msgpack.packb(stopping_event, use_bin_type = True, default = self.default_conversion)
                 # self.sock_out.send_multipart([b'', stopping_event])
                 break
+        
+        # shut down gracefully
+        self.shutdown()
     
     def shutdown(self):
         self.shutdown_flag.set()

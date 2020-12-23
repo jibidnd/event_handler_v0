@@ -19,8 +19,8 @@ class DatafeedSynchronizer(BaseDataFeed):
             datafeeds (iterable, optional): iterable of datafeeds to synchronize. Defaults to None.
         """
         super().__init__(None, zmq_context)
-        self.sync_key = sync_key
         self.datafeeds = datafeeds or []
+        self.sync_key = sync_key
 
     def add_datafeed(datafeed):
         self.datafeeds.append(datafeed)
@@ -28,9 +28,12 @@ class DatafeedSynchronizer(BaseDataFeed):
 
     def publish(self):
 
-        # Start from beginning
+        # get results first
         for datafeed in self.datafeeds:
-            datafeed.from_beginning = True
+            datafeed.execute_query()
+
+        # wait for the starting signal
+        self.start_sync.wait()
 
         while (not self.main_shutdown_flag.is_set()) and \
                 (not self.shutdown_flag.is_set()) and \
