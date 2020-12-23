@@ -2,6 +2,8 @@ import datetime
 import math
 import pytz
 import importlib
+import string
+import random
 
 #======================================================================================================================
 # Useful constants
@@ -138,6 +140,16 @@ def get_free_tcp_address(port = 1234, max_port = 1300, exclude = None):
             raise
     raise IOError('No free ports.')
 
+def get_inproc_address(exclude = None):
+    
+    exclude = exclude or []
+    while True:
+        random_string = ''.join(random.choice(string.ascii_lowercase) for i in range(12))
+        inproc_address = 'inproc://' + random_string
+        if inproc_address not in exclude:
+            return inproc_address
+        else:
+            pass
 
 def duration_to_sec(duration):
     '''

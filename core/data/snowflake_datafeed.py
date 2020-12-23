@@ -47,7 +47,7 @@ class SnowflakeDataFeed(BaseDataFeed):
 
         self.cur.execute(self.query)
 
-    def fetch(self, limit = None):
+    def fetch(self, limit = 1):
         # if starting over
         if self.from_beginning:
             self.execute_query()
@@ -69,7 +69,6 @@ class SnowflakeDataFeed(BaseDataFeed):
         return res_with_topic
 
     def publish(self):
-        # TODO: sync to start
 
         # if starting over
         if self.from_beginning:

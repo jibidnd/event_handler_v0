@@ -262,6 +262,7 @@ class Strategy(event_handler.EventHandler):
                         next_events[name] = msgpack.unpackb(event)
                     except zmq.ZMQError as exc:
                         if exc.errno == zmq.EAGAIN:
+                            # Nothing to grab
                             pass
                         else:
                             raise
@@ -289,6 +290,14 @@ class Strategy(event_handler.EventHandler):
 
         global keep_running
         keep_running = False
+
+        time.sleep(0.1)
+
+        # close sockets
+        for socket in [self.parent, self.children, self.data_socket, self.order_socket, self.logging_socket]:
+            if (socket is not None) and (~socket.closed):
+                socket.close(linger = 10)
+
         return
 
     # ----------------------------------------------------------------------------------------------------

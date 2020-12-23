@@ -118,6 +118,7 @@ class Broker(event_handler.EventHandler):
         for order_id, open_order in self.open_orders.items():
             # if there any fills (full or partial)
             if immediate_fill(open_order, data):
+                # print('order filled at {}'.format(utils.unix2datetime(self.clock)))
                 # emit the resulting order
                 # Note that this is the current status of the order, not the incremental fills
                 order_packed = msgpack.packb(open_order, use_bin_type = True, default = utils.default_conversion)
@@ -136,6 +137,7 @@ class Broker(event_handler.EventHandler):
         pass
 
     def _handle_order(self, order):
+        # print('received order for {} at {}'.format(utils.unix2datetime(order['EVENT_TS']), utils.unix2datetime(self.clock)))
         if order[c.EVENT_SUBTYPE] == c.REQUESTED:
             if order[c.ORDER_TYPE] in [c.MARKET, c.LIMIT]:
                 # Add to open orders
@@ -231,7 +233,7 @@ def immediate_fill(order, data, fill_strategy = c.CLOSE, commission = 0.0):
                 return the fill price.
             Defaults to c.CLOSE.
     """    
-
+    # time.sleep(0.1)
     assert order.get(c.QUANTITY_OPEN) > 0, 'Nothing to fill.'
     # calculate fill price
     p = None
@@ -272,10 +274,7 @@ def immediate_fill(order, data, fill_strategy = c.CLOSE, commission = 0.0):
         order[c.DEBIT] += q * p if q > 0 else 0
         order[c.NET] = order[c.CREDIT] - order[c.DEBIT]
         order[c.AVERAGE_PRICE] = abs(order[c.NET]) / order[c.QUANTITY_FILLED]
-        if data[c.EVENT_TYPE] == c.BAR:
-            order[c.EVENT_TS] = data[c.EVENT_TS] + data[c.MULTIPLIER] + utils.duration_to_sec(data[c.RESOLUTION])
-        else:
-            order[c.EVENT_TS] = data[c.EVENT_TS]
+        order[c.EVENT_TS] = data[c.EVENT_TS] #+ data[c.MULTIPLIER] * data[c.RESOLUTION] / 2
         return True
     else:
         return False

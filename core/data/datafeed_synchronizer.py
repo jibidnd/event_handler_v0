@@ -39,7 +39,7 @@ class DatafeedSynchronizer(BaseDataFeed):
             # A mapping to keep track of datafeeds
             dict_datafeeds = {i: datafeed for i, datafeed in enumerate(self.datafeeds)}
             dict_events = {}
-
+            
             for i, datafeed in dict_datafeeds.items():
                 # Attempt to fill the event queue for any slots that are empty
                 if (not datafeed.is_finished) and (dict_events.get(i) is None):
@@ -69,6 +69,8 @@ class DatafeedSynchronizer(BaseDataFeed):
                 self.is_finished = True
                 self.shutdown()
                 break
+            
+        self.shutdown()
 
     def shutdown(self):
         self.shutdown_flag.set()

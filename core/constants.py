@@ -52,6 +52,9 @@ INFO = 'INFO'
 # Bar attributes
 MULTIPLIER = 'MULTIPLIER'
 RESOLUTION = 'RESOLUTION'
+LEFT = 'LEFT'
+CENTER = 'CENTER'
+RIGHT = 'RIGHT'
 
 # event_subtype for commands
 INFO = 'INFO'

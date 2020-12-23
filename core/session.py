@@ -7,7 +7,7 @@ import time
 import zmq
 import msgpack
 
-from ..utils.util_functions import get_free_tcp_address
+from ..utils.util_functions import get_free_tcp_address, get_inproc_address
 
 from . import constants as c
 
@@ -56,7 +56,7 @@ class Session:
         # want to avoid taking datafeed_publisher_address (it is "free" right now because it's been released by get_free_tcp_address)
         addresses_used = []
 
-        # datafeed in
+        # # datafeed in
         self.datafeed_publisher_address, _, _ = get_free_tcp_address(exclude = addresses_used)
         addresses_used.append(self.datafeed_publisher_address)
         # datafeed out
@@ -68,6 +68,19 @@ class Session:
         # BOB to brokers
         self.broker_broker_address, _, _ = get_free_tcp_address(exclude = addresses_used)
         addresses_used.append(self.broker_broker_address)
+
+        # inproc was rather unstable for some reason.
+        # self.datafeed_publisher_address = get_inproc_address(exclude = addresses_used)
+        # addresses_used.append(self.datafeed_publisher_address)
+        # # datafeed out
+        # self.datafeed_subscriber_address = get_inproc_address(exclude = addresses_used)
+        # addresses_used.append(self.datafeed_subscriber_address)
+        # # BOB to starategies
+        # self.broker_strategy_address = get_inproc_address(exclude = addresses_used)
+        # addresses_used.append(self.broker_strategy_address)
+        # # BOB to brokers
+        # self.broker_broker_address = get_inproc_address(exclude = addresses_used)
+        # addresses_used.append(self.broker_broker_address)
 
 
         # Add datafeed proxy to proxy threads
@@ -82,8 +95,22 @@ class Session:
         for proxy_thread in self.proxy_threads:
             proxy_thread.start()
 
+        # Start datafeeds
+        for datafeed in self.datafeeds:
+            datafeed.zmq_context = self.zmq_context
+            datafeed.publish_to(self.datafeed_publisher_address)
+            datafeed.shutdown_flag = self.main_shutdown_flag
+            # datafeed will wait for a signcal to all start together
+            datafeed.start_sync.clear()
+            datafeed_thread = threading.Thread(target = datafeed.publish)
+            datafeed_thread.daemon = True
+            self.datafeed_threads.append(datafeed_thread)
+            # Start the datafeed. Publishing will be blocked until datafeed_start_sync is set.
+            datafeed_thread.start()
+
         # Start brokers
         for broker in self.brokers:
+            broker.zmq_context = self.zmq_context
             broker.connect_data_socket(self.datafeed_subscriber_address)
             broker.connect_order_socket(self.broker_broker_address)
             broker.main_shutdown_flag = self.main_shutdown_flag
@@ -95,6 +122,7 @@ class Session:
         # Start strategies
         # TODO: what if we want to multiprocess?
         for strategy in self.strategies:
+            strategy.zmq_context = self.zmq_context
             strategy.connect_data_socket(self.datafeed_subscriber_address)
             strategy.connect_order_socket(self.broker_strategy_address)
             strategy_thread = threading.Thread(target = strategy.run)
@@ -102,17 +130,6 @@ class Session:
             self.strategy_threads.append(strategy_thread)
             strategy_thread.start()
 
-        # Start datafeeds
-        for datafeed in self.datafeeds:
-            datafeed.publish_to(self.datafeed_publisher_address)
-            datafeed.shutdown_flag = self.main_shutdown_flag
-            # datafeed will wait for a signcal to all start together
-            datafeed.start_sync.clear()
-            datafeed_thread = threading.Thread(target = datafeed.publish)
-            datafeed_thread.daemon = True
-            self.datafeed_threads.append(datafeed_thread)
-            # Start the datafeed. Publishing will be blocked until datafeed_start_sync is set.
-            datafeed_thread.start()
 
         # tell datafeeds to start publishing
         self.datafeed_start_sync.set()
@@ -120,7 +137,8 @@ class Session:
         # wait for datafeeds to finish
         for data_thread in self.datafeed_threads:
             data_thread.join()
-        time.sleep(5)
+
+        time.sleep(1)
         print('shutting down...')
         # exit gracefully
         self.shutdown()
@@ -141,7 +159,7 @@ class Session:
     #     '''Kill a strategy'''
     #     pass
 
-    def shutdown(self, linger = 3):
+    def shutdown(self, linger = 0.1):
         # exiting gracefully
         self.main_shutdown_flag.set()
 
@@ -155,7 +173,7 @@ class Session:
 
         # wait a second before terminating the context
         time.sleep(linger)
-        self.zmq_context.term()
+        self.zmq_context.destroy()
 
 
 def pub_sub_proxy(address_in, address_out, capture = None, context = None, shutdown_flag = None):
@@ -189,9 +207,13 @@ def pub_sub_proxy(address_in, address_out, capture = None, context = None, shutd
     # start the proxy
     try:
         zmq.proxy(frontend, backend, capture_socket)
-    except zmq.ContextTerminated:
+    except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
         backend.close(linger = 10)
         frontend.close(linger = 10)
+    except:
+        frontend.close(linger = 10)
+        backend.close(linger = 10)
+        raise
     
     # exit gracefully
     if shutdown_flag:
@@ -245,7 +267,7 @@ def broker_proxy(address_frontend, address_backend, capture = None, context = No
     while not shutdown_flag.is_set():
 
         try:
-            socks = dict(poller.poll())
+            socks = dict(poller.poll(timeout = 10))
             
             if socks.get(frontend) == zmq.POLLIN:
                 # received order from strategy: (strategy ident, order)
@@ -271,9 +293,13 @@ def broker_proxy(address_frontend, address_backend, capture = None, context = No
                 strategy_id = order_unpacked[c.SENDER_ID]
                 frontend.send_multipart([strategy_id, order])
 
-        except zmq.ContextTerminated:
+        except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
             frontend.close(linger = 10)
-            backend.close(linger = 10) 
+            backend.close(linger = 10)
+        except:
+            frontend.close(linger = 10)
+            backend.close(linger = 10)
+            raise
 
     # exit gracefully
     if shutdown_flag.is_set():
