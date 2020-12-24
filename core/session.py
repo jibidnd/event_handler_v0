@@ -7,7 +7,7 @@ import time
 import zmq
 import msgpack
 
-from ..utils.util_functions import get_free_tcp_address, get_inproc_address
+from ..utils.util_functions import get_free_tcp_address, get_inproc_address, default_conversion
 
 from . import constants as c
 
@@ -101,7 +101,7 @@ class Session:
             datafeed.publish_to(self.datafeed_publisher_address)
             datafeed.shutdown_flag = self.main_shutdown_flag
             # datafeed will wait for a signcal to all start together
-            datafeed.start_sync.clear()
+            datafeed.start_sync = self.datafeed_start_sync
             datafeed_thread = threading.Thread(target = datafeed.publish)
             datafeed_thread.daemon = True
             self.datafeed_threads.append(datafeed_thread)
@@ -138,8 +138,8 @@ class Session:
         for data_thread in self.datafeed_threads:
             data_thread.join()
 
-        time.sleep(1)
-        print('shutting down...')
+        time.sleep(0.1)
+        # print('shutting down...')
         # exit gracefully
         self.shutdown()
 
@@ -306,6 +306,126 @@ def broker_proxy(address_frontend, address_backend, capture = None, context = No
         frontend.close(linger = 10)
         backend.close(linger = 10)
 
+def proxy(address_data_backend, address_data_frontend, address_broker_backend, address_broker_frontend, sync_key = 'EVENT_TS',\
+            zmq_context = None, shutdown_flag = None, default_broker = None, data_capture_address = None, broker_capture_address = None):
+    '''
+        Relays messages from backend (address_in) to frontend (address_out),
+        so strategies can have one central place to subscribe data from.
+
+        Note that we are binding on the subscriber end because we have a
+        multiple publisher (datafeeds) - one subscriber (session) pattern
+    '''
+
+    # set up context
+    context = context or zmq.Context.instance()
+
+    # datafeed proxy
+    # ---------------------------------------------------------------
+    # datafeed facing socket
+    data_backend = context.socket(zmq.SUB)
+    # no filtering here
+    data_backend.setsockopt(zmq.SUBSCRIBE, b'')
+    data_backend.bind(address_in)
+
+    # strategy facing socket
+    data_frontend = context.socket(zmq.PUB)
+    data_frontend.bind(address_out)
+    
+    # if there is a capture socket
+    if data_capture_address:
+        # bind to capture address
+        data_capture = context.socket(zmq.PUB)
+        data_capture.bind(data_capture_address)
+    else:
+        data_capture = None
 
 
+    # broker proxy
+    # ---------------------------------------------------------------
+    # broker facing socket
+    broker_backend = context.socket(zmq.ROUTER)
+    broker_backend.bind(address_backend)
+    # strategy facing socket
+    broker_frontend = context.socket(zmq.ROUTER)
+    broker_frontend.bind(address_broker_frontend)
 
+    # if there is a capture socket
+    if broker_capture_address:
+        # bind to capture address
+        broker_capture = context.socket(zmq.PUB)
+        broker_capture.bind(broker_capture_address)
+    else:
+        broker_capture = None
+
+    # the event queue
+    next_events = {}
+    # socket orders for ties
+    dict_tiebreaker = {'broker_frontend': 0, 'broker_backend': 1, 'data_backend': 2}
+
+    while not shutdown_flag.is_set():
+        
+        try:
+
+            # If any slot us empty, try to fill it
+            for name, sock in zip(['data_backend', 'broker_backend', 'broker_frontend'],
+                                    [data_backend, broker_backend, broker_frontend]):
+                if next_events.get(name) is None:
+                    try:
+                        envelope_encoded, event_packed = sock.recv_multipart(zmq.NOBLOCK)
+                        next_events[name] = (envelope_encoded, event_packed)
+                    except:
+                        zmq.ZMQError as exc:
+                        if exc.errno == zmq.EAGAIN:
+                            # nothing to get
+                            pass
+                        else:
+                            shut_down()
+                            raise                   
+
+            # sort the events
+            # take the first item (socket name) of the first item ((socket name, event)) of the sorted queue
+            next_socket = sorted(next_events.items(), key = lambda x: (x[1][sync_key], dict_tiebreaker[x[0]]))[0][0]
+            next_event = next_events.pop(next_socket)
+
+            # emit the event
+            if next_socket == 'data_backend':
+                # if it is data, just pass it on
+                data_frontend.send_multipart(next_event[0], next_event[1])
+            elif next_socket == 'broker_backend':
+                # if it is an order from backend, need to unpack it
+                # and figure out which strategy to send it to
+                order_packed = next_event[1]
+                order_unpacked = msgpack.unpackb(next_event[1])
+                # retrieve sender id from order
+                strategy_id_encoded = order_unpacked[c.SENDER_ID].encode('utf-8')
+                # send the order to frontend
+                broker_frontend.send_multipart([strategy_id_encoded, order_packed])
+            elif next_socket == 'broker_frontend':
+                # if it is an order from front end, need to unpack it
+                # and figure out which broker to send it to
+                order_packed = next_event[1]
+                order_unpacked = msgpack.unpackb(next_event[1])
+                # add sender id to order as a string
+                order_unpacked[c.SENDER_ID] = next_event[0].decode('utf-8')
+                # repack order
+                order_packed = msgpack.packb(order_unpacked, use_bin_type = True, default = default_conversion)
+                # determine broker to send to
+                if (broker := order.get(c.BROKER)) is not None:
+                    broker = broker
+                else:
+                    broker = default_broker
+                # send the order to backend
+                broker_backend.send_multipart(broker.encode('utf-8'), order_packed)
+        
+        except (zmq.ContextTerminated, zmq.ZMQError):
+            # Not sure why it's not getting caught by ContextTerminated
+            shutdown()
+
+    shutdown()
+
+
+    def shutdown():
+        data_backend.close(linger =10)
+        data_frontend.close(linger =10)
+        broker_backend.close(linger =10)
+        broker_frontend.close(linger =10)
