@@ -8,7 +8,7 @@ from .. import constants as c
 
 class DatafeedSynchronizer(BaseDataFeed):
     
-    def __init__(self, sync_key, datafeeds = None, zmq_context = None):
+    def __init__(self, sync_key = 'EVENT_TS', datafeeds = None, zmq_context = None):
         """
             Takes a collection of datafeeds and package them into one synchronized datafeed,
                 while preserving the topic.
@@ -20,17 +20,49 @@ class DatafeedSynchronizer(BaseDataFeed):
         """
         super().__init__(None, zmq_context)
         self.datafeeds = datafeeds or []
+        # A mapping to keep track of datafeeds
+        self.dict_datafeeds = {i: datafeed for i, datafeed in enumerate(datafeeds)} # number: datafeed
         self.sync_key = sync_key
+        self.next_events = {}   # datafeed number: (topic, event_msg)
 
     def add_datafeed(datafeed):
         self.datafeeds.append(datafeed)
+        self.dict_datafeeds.update({len(self.dict_datafeeds): datafeed})
 
-
-    def publish(self):
-
-        # get results first
+    def execute_query(self):
         for datafeed in self.datafeeds:
             datafeed.execute_query()
+            self.from_beginning = False
+
+    def fetch(self):
+
+        # If need to get results from scratch
+        if self.from_beginning:
+            self.execute_query()
+            self.from_beginning = False
+        
+        # Get data from all the datafeeds
+        for i, datafeed in dict_datafeeds.items():
+
+            # Attempt to fill the event queue for any slots that are empty
+            if (not datafeed.is_finished) and (self.next_events.get(i) is None):
+                res = datafeed.fetch(1)
+                # if nonempty results
+                if len(res) > 0:
+                    res = res[0]
+                    self.next_events[i] = res
+
+        # Sort the events
+        if len(self.next_events) > 0:
+            # sort key: sync key of the event msg ([1] of (topic, event_msg) tuple) of the dict value ([1] of dict.items())
+            next_socket = sorted(self.next_events.items(), key = lambda x: x[1][1][self.sync_key])[0]
+            # return first event
+            return self.next_events.pop(next_socket)
+        else:
+            # otherwise return None
+            return
+
+    def publish(self):
 
         # wait for the starting signal
         self.start_sync.wait()
@@ -39,40 +71,25 @@ class DatafeedSynchronizer(BaseDataFeed):
                 (not self.shutdown_flag.is_set()) and \
                 (not self.is_finished):
 
-            # A mapping to keep track of datafeeds
-            dict_datafeeds = {i: datafeed for i, datafeed in enumerate(self.datafeeds)}
-            dict_events = {}
-            
-            for i, datafeed in dict_datafeeds.items():
-                # Attempt to fill the event queue for any slots that are empty
-                if (not datafeed.is_finished) and (dict_events.get(i) is None):
-                    res = datafeed.fetch(1)
-                    # if nonempty results
-                    if len(res) > 0:
-                        res = res[0]
-                        dict_events[i] = res
-            # anything to publish?
-            if len(dict_events) > 0:
-                events = sorted(dict_events.values(), key = lambda x: x[1][self.sync_key])
+            # get the next event: (topic, event_msg)
+            if (event := self.fetch()) is not None:
 
-                # emit the events
-                for event in events:
-                    try:
-                        event_packed = msgpack.packb(event[1], use_bin_type = True, default = self.default_conversion)
-                        self.sock_out.send_multipart([event[0].encode(), event_packed], flag = zmq.NOBLOCK)
-                    
-                    except zmq.ZMQError as exc:
-                        # Drop messages if queue is full
-                        if exc.errno == zmq.EAGAIN:
-                            pass
-                        else:
-                            self.shutdown()
-                            raise
+                try:
+                    event_packed = msgpack.packb(event[1], use_bin_type = True, default = self.default_conversion)
+                    self.sock_out.send_multipart([event[0].encode(), event_packed], flag = zmq.NOBLOCK)
+                except zmq.ZMQError as exc:
+                    # Drop messages if queue is full
+                    if exc.errno == zmq.EAGAIN:
+                        pass
+                    else:
+                        self.shutdown()
+                        raise
             else:
+                # no more events; shut down.
                 self.is_finished = True
                 self.shutdown()
                 break
-            
+        
         self.shutdown()
 
     def shutdown(self):
