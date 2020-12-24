@@ -23,14 +23,14 @@ from ... import utils
 '''
 
 class Broker(event_handler.EventHandler):
-    def __init__(self, name, zmq_context = None, data_address = None, order_address = None, logging_addresses = None):
+    def __init__(self, name, fill_method, zmq_context = None, data_address = None, order_address = None, logging_addresses = None):
         
         # initialization params
         self.name = name
-        self.zmq_context = zmq_context or zmq.Context.instance()
-        self.broker_id = str(uuid.uuid1()) # Note that this shows the network address.
-        # self.datas = {}
-        self.open_orders = {}
+        self.zmq_context = zmq_context
+        self.broker_id = str(uuid.uuid1())  # Note that this shows the network address.
+        self.open_orders = {}               # better to refer to orders by id so we can refer to the same order even if attributes change
+        self.closed_orders = []
 
         self.data_address = data_address
         self.order_address = order_address
@@ -49,31 +49,49 @@ class Broker(event_handler.EventHandler):
             for logging_address in logging_addresses:
                 self.connect_logging_socket(logging_address)
         
+        # These can be overriden for threads, but are otherwise just placeholders
         self.main_shutdown_flag = threading.Event()
         self.shutdown_flag = threading.Event()
         
+        # clock is only used in "socket modes"
         self.clock = 0.00
     
     # ----------------------------------------------------------------------------------------
+    # Connections
+    # ----------------------------------------------------------------------------------------
     def connect_data_socket(self, data_address):
+
         # if new address, overwrite the current record
         self.data_address = data_address
+        
+        # establish a context if none provided
+        if self.zmq_context is None:
+            self.zmq_context = zmq.Context.Instance()
+        
         # Create a data socket if none exists yet
         if not self.data_socket:
             socket = self.zmq_context.socket(zmq.SUB)
             self.data_socket = socket
-        # subscribe to everything because we need to track the data ahead of time
+        
+        # subscribe to everything because we don't know what we'll need to match orders against
         self.data_socket.setsockopt(zmq.SUBSCRIBE, b'')
         self.data_socket.connect(data_address)
         
         return
     
     def connect_order_socket(self, order_address):
+
         # if new address, overwrite the current record
         self.order_address = order_address
+
+        # establish a context if none provided
+        if self.zmq_context is None:
+            self.zmq_context = zmq.Context.Instance()
+
         # Create a order socket if none exists yet
         if not self.order_socket:
             socket = self.zmq_context.socket(zmq.DEALER)
+            # note that this broker is identified by its name
             socket.setsockopt(zmq.IDENTITY, self.name.encode())
             self.order_socket = socket
         self.order_socket.connect(order_address)
@@ -92,45 +110,24 @@ class Broker(event_handler.EventHandler):
         self.logging_socket.conenct(logging_address)
 
     # ----------------------------------------------------------------------------------------
+    # Event handling
+    # ----------------------------------------------------------------------------------------
     def _handle_data(self, data):
-        # '''Update lines in self.datas with data event'''
-        # try:
-        #     symbol = data.get(c.SYMBOL)
-        # except KeyError:
-        #     # TODO:
-        #     raise
-        #     # log error: data event not well formed
-        #     return
-        # # If data is of type tick, bar, or quote, keep track of it
-        # if (data.get(c.EVENT_TYPE) == c.DATA) & (data.get(c.EVENT_SUBTYPE) in [c.TICK, c.BAR, c.QUOTE]):
-        #     # Add a line if none exists yet
-        #     if self.datas.get(symbol) is None:
-        #         self.datas[symbol] = lines()
-        #     # update the line
-        #     self.datas[symbol].update_with_data(data)
+        # The broker does not keep track of data history
 
         # first update clock
+        # data is expected to be right aligned (EVENT_TS marks the end of the event)
         self.clock = data[c.EVENT_TS]
+
+        fills = self.try_fill_with_data(data)
         
-        # keeping track of closed orders
-        closed = []
-        # try to fill each order
-        for order_id, open_order in self.open_orders.items():
-            # if there any fills (full or partial)
-            if immediate_fill(open_order, data):
-                # print('order filled at {}'.format(utils.unix2datetime(self.clock)))
-                # emit the resulting order
-                # Note that this is the current status of the order, not the incremental fills
-                order_packed = msgpack.packb(open_order, use_bin_type = True, default = utils.default_conversion)
-                self.order_socket.send(order_packed, flags = zmq.NOBLOCK)
-                # can forget this order if the order is fully filled
-                if open_order[c.QUANTITY_OPEN] == 0:
-                    closed.append(order_id)
-                    open_order[c.EVENT_SUBTYPE] = c.FILLED
-        
-        for order_id in closed:
-            self.open_orders.pop(order_id)
+        if (fills is not None) and (self.order_socket is not None):
             
+            # emit the order if there are any fills
+            for order in fills:
+                order_packed = msgpack.packb(order, use_bin_type = True, default = utils.default_conversion)
+                self.order_socket.send(order_packed, flags = zmq.NOBLOCK)
+
         return self.handle_data(data)
 
     def handle_data(self, data):
@@ -138,10 +135,26 @@ class Broker(event_handler.EventHandler):
 
     def _handle_order(self, order):
         # print('received order for {} at {}'.format(utils.unix2datetime(order['EVENT_TS']), utils.unix2datetime(self.clock)))
+
+        order_response = self.take_order(order)
+        if (order_response is not None) and (self.order_socket is not None):
+            # emit the response if there is any
+            order_response_packed = msgpack.packb(order_response, use_bin_type = True, default = utils.default_conversion)
+            self.order_socket.send(order_response, flags = zmq.NOBLOCK)
+        
+        return self.handle_order(order)
+
+    def handle_order(self, order):
+        pass
+
+    def take_order(self, order):
+        
         if order[c.EVENT_SUBTYPE] == c.REQUESTED:
             if order[c.ORDER_TYPE] in [c.MARKET, c.LIMIT]:
                 # Add to open orders
                 order_id = order[c.ORDER_ID]
+                # change order status to subitted
+                order[c.EVENT_SUBTYPE] == c.SUBMITTED
                 # add quantity open field if none set
                 if order.get(c.QUANTITY_OPEN) is None:
                     order[c.QUANTITY_OPEN] = order[c.QUANTITY]
@@ -149,21 +162,61 @@ class Broker(event_handler.EventHandler):
                     order[c.QUANTITY_FILLED] = 0
                 # Add to the collection
                 self.open_orders[order_id] = order
+
+                # acknowledge acceptance of order (with submitted status)
+                return order
+
             elif order[c.ORDER_TYPE] == c.CANCELLATION:
                 # remove from open orders and acknowledge cancellation
                 try:
                     cancelled_order = self.open_orders.pop(order[c.ORDER_ID])
-                    cancelled_order.update({c.EVENT_TS: self.clock, c.EVENT_SUBTYPE: c.CANCELLED})
+                    cancelled_order = order.update({c.EVENT_TS: self.clock, c.EVENT_SUBTYPE: c.CANCELLED})
                 except KeyError:
                     cancelled_order = order.update({c.EVENT_TS: self.clock, c.EVENT_SUBTYPE: c.INVALID})
-                cancelled_order_packed = msgpack.packb(cancelled_order, use_bin_type = True, default = utils.default_conversion)
-                self.order_socket.send(cancelled_order_packed, flags = zmq.NOBLOCK)
+        
+            return cancelled_order
 
-        self.handle_order(order)
-        return
 
-    def handle_order(self, order):
-        pass
+    def try_fill_with_data(self, data):
+        """ Tries to fill all currently open orders against data.
+            returns a list of fills if any, otherwise returns None.
+
+        Args:
+            data (dict): data event.
+
+        Returns:
+            list or None: list of fills if any, otherwise None.
+        """
+        # keeping track of orders closed/filled with this data event
+        # recall that we cannot change the dictionary size mid-iteration
+        closed = []
+        fills = []
+
+        # nothing to do if it is not price data
+        if (symbol_data := data.get(c.SYMBOL)) is None:
+            return
+
+        else:
+            # try to fill each order
+            for order_id, open_order in self.open_orders.items():
+                if (symbol_order := open_order[c.SYMBOL]) == symbol_data:
+                    # If there is a fill (partial or complete)
+                    if self.fill_method(open_order, data):
+
+                        # can forget this order if the order is fully filled
+                        if open_order[c.QUANTITY_OPEN] == 0:
+                            closed.append(order_id)
+                            open_order[c.EVENT_SUBTYPE] = c.FILLED
+                        else:
+                            open_order[c.EVENT_SUBTYPE] = c.PARTIALLY_FILLED
+                        
+                        fills.append(open_order)
+            
+            # closed orders from self.open_orders to self.closed_orders
+            for order_id in closed:
+                self.closed_orders.append(self.open_orders.pop(order_id))
+
+            return fills
 
     def run(self):
 

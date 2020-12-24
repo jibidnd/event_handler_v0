@@ -47,7 +47,7 @@ class Strategy(event_handler.EventHandler):
         self.open_trades = {}           # trade_id: [position_ids]
         self.closed_trades = {}         # trade_id: [position_ids]
         self.open_positions = {}        # position_id: position object
-        self.closed_positions = {}      # position_id: position object
+        self.closed_positions = {}      # position_id: position object  # TODO: closed positions need to be moved to closed_positions from open_positions
         # TODO
         self.pending_orders = {}        # orders not yet filled: order_id: order_event
 
@@ -345,7 +345,7 @@ class Strategy(event_handler.EventHandler):
                 is published to the child that requested that order.
         2) Result of a prior order sent
             - If the order is of subtype in [DENIED, SUBMITTED, FAILED,
-                                                RECEIVED, FILLED, EXPIRED,
+                                                RECEIVED, FILLED, PARTIALLY_FILLED, EXPIRED,
                                                 CANCELLED, REJECTED]
                 (which implies that the origin of the order is from this strategy),
                 the order is sent to the corresponding position to update the position.

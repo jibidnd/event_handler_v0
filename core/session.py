@@ -174,6 +174,18 @@ class Session:
         # wait a second before terminating the context
         time.sleep(linger)
         self.zmq_context.destroy()
+    
+    def event_dispatch(self):
+        '''
+            - router socket to strategies
+            - publish socket to strategies
+            - continuous loop:
+                - broker handle orders from strategies; send any response
+                - get data
+                - broker handle data; send any response
+                - send data
+        '''
+        pass
 
 
 def pub_sub_proxy(address_in, address_out, capture = None, context = None, shutdown_flag = None):
