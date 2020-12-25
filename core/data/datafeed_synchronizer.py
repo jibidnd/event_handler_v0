@@ -25,7 +25,7 @@ class DatafeedSynchronizer(BaseDataFeed):
         self.sync_key = sync_key
         self.next_events = {}   # datafeed number: (topic, event_msg)
 
-    def add_datafeed(datafeed):
+    def add_datafeed(self, datafeed):
         self.datafeeds.append(datafeed)
         self.dict_datafeeds.update({len(self.dict_datafeeds): datafeed})
 
@@ -34,33 +34,45 @@ class DatafeedSynchronizer(BaseDataFeed):
             datafeed.execute_query()
             self.from_beginning = False
 
-    def fetch(self):
+    def fetch(self, limit = 1):
 
         # If need to get results from scratch
         if self.from_beginning:
             self.execute_query()
             self.from_beginning = False
         
-        # Get data from all the datafeeds
-        for i, datafeed in dict_datafeeds.items():
+        counter = 0
+        results = []
 
-            # Attempt to fill the event queue for any slots that are empty
-            if (not datafeed.is_finished) and (self.next_events.get(i) is None):
-                res = datafeed.fetch(1)
-                # if nonempty results
-                if len(res) > 0:
-                    res = res[0]
-                    self.next_events[i] = res
+        while counter < limit:
+            # Get data from all the datafeeds
+            for i, datafeed in self.dict_datafeeds.items():
 
-        # Sort the events
-        if len(self.next_events) > 0:
-            # sort key: sync key of the event msg ([1] of (topic, event_msg) tuple) of the dict value ([1] of dict.items())
-            next_socket = sorted(self.next_events.items(), key = lambda x: x[1][1][self.sync_key])[0]
-            # return first event
-            return self.next_events.pop(next_socket)
+                # Attempt to fill the event queue for any slots that are empty
+                if (not datafeed.is_finished) and (self.next_events.get(i) is None):
+                    res = datafeed.fetch(1)
+                    # if nonempty results
+                    if len(res) > 0:
+                        res = res[0]
+                        self.next_events[i] = res
+
+            # Sort the events
+            if len(self.next_events) > 0:
+                # sort key: sync key of the event msg ([1] of (topic, event_msg) tuple) of the dict value ([1] of dict.items())
+                next_socket = sorted(self.next_events.items(), key = lambda x: x[1][1][self.sync_key])[0]
+                # return first event
+                results.append(self.next_events.pop(next_socket))
+                counter += 1
+            else:
+                # otherwise return None
+                break
+
+        if len(results) > 1:
+            return results
+        elif len(results) == 1:
+            return results[0]
         else:
-            # otherwise return None
-            return
+            return 
 
     def publish(self):
 
