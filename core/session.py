@@ -2,7 +2,7 @@
 A session coordinates instances of events, brokers, and strategies.
 '''
 import threading
-import socket
+import operator
 import time
 import zmq
 import msgpack
@@ -204,6 +204,11 @@ class Session:
         # exiting gracefully
         self.main_shutdown_flag.set()
 
+        # close the sockets, if any
+        for socket in [self.broker_strategy_socket, self.data_subscriber_socket]:
+            if (socket is not None) and (~socket.closed):
+                socket.close(linger = 10)
+
         # tell strategies to stop
         for strategy in self.strategies:
             strategy.stop()
@@ -218,6 +223,7 @@ class Session:
     
     def sync_events(self):
         '''
+            This is equivalent to pausing time to process all orders.
             - router socket to strategies
             - publish socket to strategies
             - continuous loop:
@@ -229,10 +235,12 @@ class Session:
 
         # the event queue
         next_events = []
+        # data/responses to send
+        to_send = []
 
         while not self.main_shutdown_flag.is_set():
             
-            # try to get orders from strategies
+            # try to get (all) orders from strategies
             while True:
                 try:
                     strategy_id_encoded, order_packed = self.broker_strategy_socket.recv_multipart(zmq.NOBLOCK)
@@ -247,29 +255,53 @@ class Session:
                         raise
             
             # Get next data event
-            next_events.append(self.synced_datafeed.fetch(1))
+            if (next_data := self.synced_datafeed.fetch(1)) is not None:
+                next_events.append(next_data)
+            else:
+                # if no more data, we're done.
+                self.main_shutdown_flag.set()
 
-        # sort the events
-        next_events = sorted(next_events,)
-        #handle each event
-        # put data at the end???
+            # sort the events by timestamp
+            # sorts are "stable"; i.e. in the case of a tie, the original order is preserved
+            # since orders were inserted first, order will be taken care of first in the case of a tie.
+            next_events = sorted(next_events, key = operator.itemgetter(c.EVENT_TS))
 
-                # sort the events
-                # take the first item (socket name) of the first item ((socket name, event)) of the sorted queue
-                next_socket = sorted(next_events.items(), key = lambda x: (x[1][sync_key], dict_tiebreaker[x[0]]))[0][0]
-                next_event = next_events.pop(next_socket)
+            # handle each event, in order
+            for event in next_events:
 
-                # emit the event
-                if next_socket == 'data_backend':
-                    # if it is data, just pass it on
-                    data_frontend.send_multipart(next_event[0], next_event[1])
+                # if the event is an order (from strategies)
+                if event[c.EVENT_TYPE] == c.ORDER:
+                    
+                    # find a broker
+                    if (broker := event.get(c.BROKER)) is None:
+                        broker = next(iter(self.brokers.values()))
+                    # have broker handle the order
+                    response = broker.take_order(event)
+                    # prepare the response
+                    response_packed = msgpack.packb(response)
+                    original_sender = event[c.SENDER_ID]
+                    original_sender_encoded = original_sender.encode('utf-8')
+                    # send the response
+                    self.broker_strategy_socket.send_multipart([original_sender_encoded, response_packed])
 
-            
-            except (zmq.ContextTerminated, zmq.ZMQError):
-                # Not sure why it's not getting caught by ContextTerminated
-                shutdown()
+                # else if the event is a data event
+                elif event[c.EVENT_TYPE] == c.DATA:
+                    
+                    # first let the broker try to fill any outstanding orders
+                    for broker in self.brokers.values():
+                        if (fills := broker.try_fill_with_data(event)) is not None:
+                            for fill in fills:
+                                # prepare the response
+                                response_packed = msgpack.packb(fill)
+                                original_sender = fill[c.SENDER_ID]
+                                original_sender_encoded = original_sender.encode('utf-8')
+                                self.broker_strategy_socket.send_multipart([original_sender_encoded, response_packed])
 
-        shutdown()
+                    # Then we can send the data to the strategies
+                    self.data_subscriber_socket.send_multipart(event)
+        
+        # Done processing all data events; close things
+        self.shutdown()
 
 
 def pub_sub_proxy(address_in, address_out, capture = None, context = None, shutdown_flag = None):

@@ -50,10 +50,8 @@ class DatafeedSynchronizer(BaseDataFeed):
 
                 # Attempt to fill the event queue for any slots that are empty
                 if (not datafeed.is_finished) and (self.next_events.get(i) is None):
-                    res = datafeed.fetch(1)
+                    if (res := datafeed.fetch(1)) is not None:
                     # if nonempty results
-                    if len(res) > 0:
-                        res = res[0]
                         self.next_events[i] = res
 
             # Sort the events

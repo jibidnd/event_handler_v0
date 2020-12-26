@@ -65,7 +65,7 @@ class SnowflakeDataFeed(BaseDataFeed):
         # set flag if nothing else to get
         if len(res_with_topic) == 0:
             self.is_finished = True
-            return res_with_topic
+            return
         
         return res_with_topic
 

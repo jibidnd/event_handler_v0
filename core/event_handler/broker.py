@@ -173,8 +173,8 @@ class Broker(event_handler.EventHandler):
                     cancelled_order = order.update({c.EVENT_TS: self.clock, c.EVENT_SUBTYPE: c.CANCELLED})
                 except KeyError:
                     cancelled_order = order.update({c.EVENT_TS: self.clock, c.EVENT_SUBTYPE: c.INVALID})
-        
-            return cancelled_order
+                finally:
+                    return cancelled_order
 
 
     def try_fill_with_data(self, data):
@@ -182,7 +182,7 @@ class Broker(event_handler.EventHandler):
             returns a list of fills if any, otherwise returns None.
 
         Args:
-            data (dict): data event.
+            data (tuple(bytes, dict)): (topic, data event).
 
         Returns:
             list or None: list of fills if any, otherwise None.
@@ -191,6 +191,9 @@ class Broker(event_handler.EventHandler):
         # recall that we cannot change the dictionary size mid-iteration
         closed = []
         fills = []
+
+        # strip the topic
+        data = data[1]
 
         # nothing to do if it is not price data
         if (symbol_data := data.get(c.SYMBOL)) is None:
