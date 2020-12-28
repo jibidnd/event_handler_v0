@@ -60,14 +60,20 @@ class SnowflakeDataFeed(BaseDataFeed):
             res = self.cur.fetchmany(limit)
         
         # add topic to results
-        res_with_topic = [(self.topic, res_i) for res_i in res]
+        for res_i in res:
+            res_i.update({c.TOPIC: self.topic})
 
         # set flag if nothing else to get
-        if len(res_with_topic) == 0:
+        if len(res) == 0:
             self.is_finished = True
             return
         
-        return res_with_topic
+        # return a list only if limit > 1
+        if limit > 1:
+            return res
+        elif limit == 1:
+            return res[0]
+
 
     def publish(self):
 

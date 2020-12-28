@@ -31,6 +31,7 @@ class Broker(event_handler.EventHandler):
         self.broker_id = str(uuid.uuid1())  # Note that this shows the network address.
         self.open_orders = {}               # better to refer to orders by id so we can refer to the same order even if attributes change
         self.closed_orders = []
+        self.fill_method = fill_method
 
         self.data_address = data_address
         self.order_address = order_address
@@ -141,20 +142,18 @@ class Broker(event_handler.EventHandler):
             # emit the response if there is any
             order_response_packed = msgpack.packb(order_response, use_bin_type = True, default = utils.default_conversion)
             self.order_socket.send(order_response, flags = zmq.NOBLOCK)
-        
         return self.handle_order(order)
 
     def handle_order(self, order):
         pass
 
     def take_order(self, order):
-        
         if order[c.EVENT_SUBTYPE] == c.REQUESTED:
             if order[c.ORDER_TYPE] in [c.MARKET, c.LIMIT]:
                 # Add to open orders
                 order_id = order[c.ORDER_ID]
                 # change order status to subitted
-                order[c.EVENT_SUBTYPE] == c.SUBMITTED
+                order[c.EVENT_SUBTYPE] = c.SUBMITTED
                 # add quantity open field if none set
                 if order.get(c.QUANTITY_OPEN) is None:
                     order[c.QUANTITY_OPEN] = order[c.QUANTITY]
@@ -192,9 +191,6 @@ class Broker(event_handler.EventHandler):
         closed = []
         fills = []
 
-        # strip the topic
-        data = data[1]
-
         # nothing to do if it is not price data
         if (symbol_data := data.get(c.SYMBOL)) is None:
             return
@@ -203,9 +199,9 @@ class Broker(event_handler.EventHandler):
             # try to fill each order
             for order_id, open_order in self.open_orders.items():
                 if (symbol_order := open_order[c.SYMBOL]) == symbol_data:
+                    # print('broker filling with ' + str(data))
                     # If there is a fill (partial or complete)
                     if self.fill_method(open_order, data):
-
                         # can forget this order if the order is fully filled
                         if open_order[c.QUANTITY_OPEN] == 0:
                             closed.append(order_id)

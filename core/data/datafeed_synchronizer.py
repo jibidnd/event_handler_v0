@@ -51,13 +51,12 @@ class DatafeedSynchronizer(BaseDataFeed):
                 # Attempt to fill the event queue for any slots that are empty
                 if (not datafeed.is_finished) and (self.next_events.get(i) is None):
                     if (res := datafeed.fetch(1)) is not None:
-                    # if nonempty results
                         self.next_events[i] = res
 
             # Sort the events
             if len(self.next_events) > 0:
-                # sort key: sync key of the event msg ([1] of (topic, event_msg) tuple) of the dict value ([1] of dict.items())
-                next_socket = sorted(self.next_events.items(), key = lambda x: x[1][1][self.sync_key])[0]
+                # sort key: sync key of the event msg of the dict value ([1] of dict.items())
+                next_socket = sorted(self.next_events.items(), key = lambda x: x[1][self.sync_key])[0][0]
                 # return first event
                 results.append(self.next_events.pop(next_socket))
                 counter += 1
@@ -65,12 +64,15 @@ class DatafeedSynchronizer(BaseDataFeed):
                 # otherwise return None
                 break
 
-        if len(results) > 1:
+        if len(results) == 0:
+            self.is_finished = True
+            return
+
+        if limit > 1:
             return results
-        elif len(results) == 1:
+        elif limit == 1:
             return results[0]
-        else:
-            return 
+
 
     def publish(self):
 

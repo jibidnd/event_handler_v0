@@ -186,8 +186,8 @@ class Strategy(event_handler.EventHandler):
         """
         # if child_strategy is provided, attempt to get these information
         if child_strategy is not None:
-            child_strategy_id = child_strategy.get('strategy_id')
-            child_address = child_strategy.get('strategy_address')
+            child_strategy_id = child_strategy.get(c.STRATEGY_ID)
+            child_address = child_strategy.get(c.STRATEGY_ADDRESS)
         
         assert (child_strategy_id) is not None, 'Need child_strategy_id and child_address info.'
         
@@ -269,15 +269,10 @@ class Strategy(event_handler.EventHandler):
                 
             # Now we can sort the upcoming events and handle the next event
             if len(next_events) > 0:
-                # Run code that needs to be executed bofore handling any event            
-                self._prenext()
                 # Handle the socket with the next soonest event (by EVENT_TS)
                 # take the first item (socket name) of the first item ((socket name, event)) of the sorted queue
                 next_socket = sorted(next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
                 next_event = next_events.pop(next_socket)        # remove the event from next_events
-                # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
-                if (tempts := next_event[c.EVENT_TS]) > self.clock.timestamp():
-                    self.clock = utils.unix2datetime(tempts)
                 self._handle_event(next_event)
 
     def before_stop(self):
@@ -313,8 +308,20 @@ class Strategy(event_handler.EventHandler):
             data = self.datas[symbol]
             # has it been a while since we had the last mark?
             if (len(data) == 0) or (self.clock - data[c.EVENT_TS[-1]]):
-                self.to_child(child, c.MARK)
+                self.to_child(symbol, c.MARK)
         return self.prenext()
+    
+    def _handle_event(self, event):
+
+        # Run code that needs to be executed bofore handling any event            
+        self._prenext()
+
+        # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
+        if (tempts := event[c.EVENT_TS]) > self.clock.timestamp():
+            self.clock = utils.unix2datetime(tempts)
+        super()._handle_event(event)
+
+
 
     def _handle_data(self, data):
         '''Update lines in self.datas with data event'''
