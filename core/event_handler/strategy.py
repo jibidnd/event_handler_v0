@@ -4,7 +4,7 @@
 import abc
 import collections
 import uuid
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import datetime
 import pytz
 import time
@@ -259,7 +259,7 @@ class Strategy(event_handler.EventHandler):
                             topic, event = socket.recv_multipart(zmq.NOBLOCK)
                         elif socket.socket_type in [zmq.DEALER]:
                             event = socket.recv(zmq.NOBLOCK)
-                        next_events[name] = msgpack.unpackb(event)
+                        next_events[name] = msgpack.unpackb(event, ext_hook = utils.ext_hook)
                     except zmq.ZMQError as exc:
                         if exc.errno == zmq.EAGAIN:
                             # Nothing to grab
@@ -577,7 +577,7 @@ class Strategy(event_handler.EventHandler):
         self.open_positions[position.position_id] = position
         return position
 
-    def create_order(self, symbol, quantity, order_type = c.MARKET, position = None, order_details = {}):
+    def create_order(self, symbol, quantity, position = None, order_details = {}):
         '''Note that order does not impact strategy until it is actually placed'''
         if position is None:
             # If there is a position with the symbol already, use the latest one of the positions with the same symbol
@@ -601,13 +601,23 @@ class Strategy(event_handler.EventHandler):
             c.POSITION_ID: position.position_id,
             c.ORDER_ID: str(uuid.uuid1()),
             c.SYMBOL: position.symbol,
+            c.ORDER_TYPE: c.MARKET,
             c.QUANTITY: quantity,
             c.EVENT_TS: self.clock.timestamp(),
             c.PRICE: self.get_mark(symbol) or 0.0,
             c.QUANTITY_OPEN: quantity
             }
         
-        return event.order_event({**default_order_details, **order_details})
+        order = {**default_order_details, **order_details}
+        for key, value in order.items():
+            try:
+                order.update({key: Decimal(value)})
+            except InvalidOperation:
+                pass
+            except:
+                raise
+        
+        return event.order_event(order)
 
     def place_order(self, order):
         '''
@@ -627,8 +637,9 @@ class Strategy(event_handler.EventHandler):
             self.open_positions[position_id]._handle_order(order)
 
         # place the order
+        print(order)
         if self.parent is None:
-            self.order_socket.send(msgpack.packb(order, use_bin_type = True, default = default_msgpack_packer))
+            self.order_socket.send(msgpack.packb(order, use_bin_type = True, default = utils.default_packer))
         else:
             self.to_parent(order)
     
@@ -677,12 +688,6 @@ class Strategy(event_handler.EventHandler):
 # ----------------------------------------------------------------------------------------------------
 # Misc Classes and fucntions
 # ----------------------------------------------------------------------------------------------------
-
-def default_msgpack_packer(obj):
-    try:
-        return float(obj)
-    except:
-        return str(obj)
 
 class RMS(abc.ABC):
     '''A risk management system that monitors risk and approves/denies order requests'''

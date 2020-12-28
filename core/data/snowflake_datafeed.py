@@ -1,5 +1,6 @@
 import time
 import configparser
+from utils import util_functions
 
 import zmq
 import msgpack
@@ -9,6 +10,7 @@ from snowflake.connector.converter_null import SnowflakeNoConverterToPython
 
 from ..data import BaseDataFeed
 from .. import constants as c
+from .. import utils.util_functions as utils
 
 class SnowflakeDataFeed(BaseDataFeed):
 
@@ -95,7 +97,7 @@ class SnowflakeDataFeed(BaseDataFeed):
 
             if res is not None:
                 # msgpack
-                res_packed = msgpack.packb(res, use_bin_type = True, default = self.default_conversion)
+                res_packed = msgpack.packb(res, use_bin_type = True, default = utils.default_packer)
                 tempts = res[c.EVENT_TS]
                 # send the event with a topic
                 try:
@@ -107,7 +109,7 @@ class SnowflakeDataFeed(BaseDataFeed):
                     else:
                         # unexpected error: shutdown and raise
                         self.shutdown()
-                        # sock.send_multipart([b'', msgpack.packb(stopping_event, use_bin_type = True, default = self.default_conversion)])
+                        # sock.send_multipart([b'', msgpack.packb(stopping_event, use_bin_type = True, default = self.default_packer)])
                         raise
                 except zmq.ContextTerminated:
                     # context is being closed by session
@@ -120,7 +122,7 @@ class SnowflakeDataFeed(BaseDataFeed):
                 self.shutdown()
 
                 # stopping_event.update({c.EVENT_TS: tempts})
-                # stopping_event = msgpack.packb(stopping_event, use_bin_type = True, default = self.default_conversion)
+                # stopping_event = msgpack.packb(stopping_event, use_bin_type = True, default = self.default_packer)
                 # self.sock_out.send_multipart([b'', stopping_event])
                 break
         

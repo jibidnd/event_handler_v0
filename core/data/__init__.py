@@ -5,6 +5,8 @@ import threading
 
 from .. import constants as c
 from ...utils.util_functions import get_free_tcp_address
+from ... import utils
+from utils import util_functions as utils
 
 class BaseDataFeed:
 
@@ -64,10 +66,3 @@ class BaseDataFeed:
         
     def publish(self):
         pass
-
-    @staticmethod
-    def default_conversion(obj):
-        try:
-            return float(obj)
-        except:
-            return str(obj)

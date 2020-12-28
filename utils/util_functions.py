@@ -5,6 +5,9 @@ import importlib
 import string
 import random
 
+import decimal
+import msgpack
+
 #======================================================================================================================
 # Useful constants
 #======================================================================================================================
@@ -191,8 +194,16 @@ def duration_to_sec(duration):
         return 60.0 * 60.0 * 24.0 * 7 * 365.25
 
 
-def default_conversion(obj):
+def default_packer(obj):
     try:
-        return float(obj)
-    except:
+        decimal.Decimal(obj)
+        return msgpack.ExtType(10, str(obj))
+    except decimal.InvalidOperation:
         return str(obj)
+    except:
+        raise
+
+def ext_hook(ext_type_code, obj):
+    if code == 10:
+        return decimal.Decimal(obj)
+    return msgpack.ExtType(ext_type_code, obj)

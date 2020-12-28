@@ -7,7 +7,8 @@ import time
 import zmq
 import msgpack
 
-from ..utils.util_functions import get_free_tcp_address, get_inproc_address, default_conversion
+from ..utils.util_functions import get_free_tcp_address, get_inproc_address, default_packer
+from .. import utils
 
 from . import constants as c
 from .data.datafeed_synchronizer import DatafeedSynchronizer
@@ -91,7 +92,7 @@ class Session:
         self.setup_strategies(socket_mode)
 
 
-        if socket_mode == 'ALL':
+        if socket_mode == c.ALL:
             # tell datafeeds to start publishing
             # proxies, brokers, and strategies should all be ready to process events
             self.datafeed_start_sync.set()
@@ -100,9 +101,11 @@ class Session:
             for data_thread in self.datafeed_threads:
                 data_thread.join()
 
-        # TODO: split?
-        elif socket_mode == 'STRATEGIES':
-            self.sync_events()
+        elif socket_mode in [c.STRATEGIES_FULL, c.STRATEGIES_LIMITED]:
+            self.process_events(socket_mode)
+
+        else:
+            raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
 
         time.sleep(0.1)
 
@@ -132,14 +135,15 @@ class Session:
         # inproc was found to be rather unstable for some reason, so we stick with tcp.
         addresses_used = []
 
+        # all socket modes get a broker frontend
+        self.broker_strategy_address, _, _ = get_free_tcp_address(exclude = addresses_used)
+        addresses_used.append(self.broker_strategy_address)
+
         if socket_mode in [c.ALL, c.STRATEGIES_FULL]:
             # datafeed frontend
             self.datafeed_subscriber_address, _, _ = get_free_tcp_address(exclude = addresses_used)
             addresses_used.append(self.datafeed_subscriber_address)
-            # broker frontend
-            self.broker_strategy_address, _, _ = get_free_tcp_address(exclude = addresses_used)
-            addresses_used.append(self.broker_strategy_address)
-        
+
             # Also need to connect to datafeeds and brokers if running async (full sockets) mode
             if socket_mode == c.ALL:
                 # datafeed backend
@@ -166,7 +170,7 @@ class Session:
             # Start the proxies
             for proxy_thread in self.proxy_threads:
                 proxy_thread.start()
-        elif socket_mode in [c.c.STRATEGIES_FULL, c.STRATEGIES_LIMITED]:
+        elif socket_mode in [c.STRATEGIES_FULL, c.STRATEGIES_LIMITED]:
             pass
         else:
             raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
@@ -201,7 +205,7 @@ class Session:
                 raise Exception('No datafeed to set up.')
             
             # if strategies require sockets, also set them up
-            if socket_mode == c.STRATEGIES:
+            if socket_mode == c.STRATEGIES_FULL:
                 self.data_subscriber_socket = self.zmq_context.socket(zmq.PUB)
                 self.data_subscriber_socket.bind(self.datafeed_subscriber_address)
         else:
@@ -225,14 +229,10 @@ class Session:
                 broker_thread.start()
         
         # if strategies require sockets, also set them up
-        elif socket_mode == c.STRATEGIES_FULL:
+        elif socket_mode in [c.STRATEGIES_FULL, c.STRATEGIES_LIMITED]:
             self.broker_strategy_socket = self.zmq_context.socket(zmq.ROUTER)
             self.broker_strategy_socket.bind(self.broker_strategy_address)
-        
-        # else nothing to do
-        elif socket_mode == c.STRATEGIES_LIMITED:
-            pass
-        
+
         else:
             raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
 
@@ -240,22 +240,16 @@ class Session:
 
     def setup_strategies(self, socket_mode):
         
-        if socket_mode in [c.ALL, c.STRATEGIES_FULL]:
-            for strategy in self.strategies.values():
-                strategy.zmq_context = self.zmq_context
-                strategy.connect_order_socket(self.broker_strategy_address)
+        for strategy in self.strategies.values():
+            strategy.zmq_context = self.zmq_context
+            strategy.connect_order_socket(self.broker_strategy_address)
 
-                if socket_mode == c.ALL:
-                    strategy.connect_data_socket(self.datafeed_subscriber_address)
-                    strategy_thread = threading.Thread(target = strategy.run)
-                    strategy_thread.daemon = True
-                    self.strategy_threads.append(strategy_thread)
-                    strategy_thread.start()
-
-        elif socket_mode == c.STRATEGIES_LIMITED:
-            pass
-        else:
-            raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
+            if socket_mode == c.ALL:
+                strategy.connect_data_socket(self.datafeed_subscriber_address)
+                strategy_thread = threading.Thread(target = strategy.run)
+                strategy_thread.daemon = True
+                self.strategy_threads.append(strategy_thread)
+                strategy_thread.start()
         
         return
 
@@ -307,7 +301,7 @@ class Session:
             while True:
                 try:
                     strategy_id_encoded, order_packed = self.broker_strategy_socket.recv_multipart(zmq.NOBLOCK)
-                    order_unpacked = msgpack.unpackb(order_packed)
+                    order_unpacked = msgpack.unpackb(order_packed, ext_hook = utils.ext_hook)
                     order_unpacked[c.SENDER_ID] = strategy_id_encoded.decode('utf-8')
                     next_events.append(order_unpacked)
                 except zmq.ZMQError as exc:
@@ -343,7 +337,7 @@ class Session:
                         # if STRATEGIES_FULL, send order response to socket
                         if socket_mode == c.STRATEGIES_FULL:
                             # prepare the response
-                            response_packed = msgpack.packb(response)
+                            response_packed = msgpack.packb(response, default = utils.default_packer)
                             original_sender = event[c.SENDER_ID]
                             original_sender_encoded = original_sender.encode('utf-8')
                             # send the response
@@ -366,7 +360,7 @@ class Session:
                                 # if STRATEGIES_FULL, send order response to socket
                                 if socket_mode == c.STRATEGIES_FULL:
                                     # prepare the response
-                                    response_packed = msgpack.packb(fill, default = default_conversion)
+                                    response_packed = msgpack.packb(fill, default = utils.default_packer)
                                     original_sender = fill[c.SENDER_ID]
                                     original_sender_encoded = original_sender.encode('utf-8')
                                     # print('order filled in session')
@@ -374,7 +368,7 @@ class Session:
                                     msg.wait()
                                 # otherwise directly have the strategy handle the event
                                 elif socket_mode == c.STRATEGIES_LIMITED:
-                                    self.strategies[event[c.SENDER_ID]]._handle_event(fill)
+                                    self.strategies[fill[c.SENDER_ID]]._handle_event(fill)
                                 else:
                                     raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
 
@@ -382,12 +376,14 @@ class Session:
                     if socket_mode == c.STRATEGIES_FULL:
                         # prepare the data
                         topic_encoded = event[c.TOPIC].encode('utf-8')
-                        event_packed = msgpack.packb(event, default = default_conversion)
+                        event_packed = msgpack.packb(event, default = utils.default_packer)
                         # print('data event in session')
                         msg = self.data_subscriber_socket.send_multipart([topic_encoded, event_packed], copy = False, track = True)
                         msg.wait()
                     elif socket_mode == c.STRATEGIES_LIMITED:
-                        self.strategies[event[c.SENDER_ID]]._handle_event(event)
+                        for strategy in self.strategies.values():
+                            if event[c.TOPIC] in strategy.data_subscriptions:
+                                strategy._handle_event(event)
                     else:
                         raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
         
@@ -492,7 +488,7 @@ def broker_proxy(address_frontend, address_backend, capture = None, context = No
             if socks.get(frontend) == zmq.POLLIN:
                 # received order from strategy: (strategy ident, order)
                 strategy_id, order = frontend.recv_multipart()
-                order = msgpack.unpackb(order)
+                order = msgpack.unpackb(order, ext_hook = utils.ext_hook)
                 order[c.SENDER_ID] = strategy_id
                 # find out which broker to send to
                 if (broker := order.get(c.BROKER)) is not None:
@@ -504,12 +500,12 @@ def broker_proxy(address_frontend, address_backend, capture = None, context = No
                     raise Exception('Either specify broker in order or specify default broker in session.')
                 
                 # send the order to the broker: (broker name, )
-                backend.send_multipart([broker.encode('utf-8'), msgpack.packb(order)])
+                backend.send_multipart([broker.encode('utf-8'), msgpack.packb(order, utils.default_packer)])
 
             elif socks.get(backend) == zmq.POLLIN:
                 # received order from broker: (broker ident, (strategy ident, order))
                 broker, order = backend.recv_multipart()
-                order_unpacked = msgpack.unpackb(order)
+                order_unpacked = msgpack.unpackb(order, ext_hook = utils.ext_hook)
                 strategy_id = order_unpacked[c.SENDER_ID]
                 frontend.send_multipart([strategy_id, order])
 
@@ -612,7 +608,7 @@ def proxy(address_data_backend, address_data_frontend, address_broker_backend, a
                 # if it is an order from backend, need to unpack it
                 # and figure out which strategy to send it to
                 order_packed = next_event[1]
-                order_unpacked = msgpack.unpackb(next_event[1])
+                order_unpacked = msgpack.unpackb(next_event[1], ext_hook = utils.ext_hook)
                 # retrieve sender id from order
                 strategy_id_encoded = order_unpacked[c.SENDER_ID].encode('utf-8')
                 # send the order to frontend
@@ -621,11 +617,11 @@ def proxy(address_data_backend, address_data_frontend, address_broker_backend, a
                 # if it is an order from front end, need to unpack it
                 # and figure out which broker to send it to
                 order_packed = next_event[1]
-                order_unpacked = msgpack.unpackb(next_event[1])
+                order_unpacked = msgpack.unpackb(next_event[1], ext_hook = utils.ext_hook)
                 # add sender id to order as a string
                 order_unpacked[c.SENDER_ID] = next_event[0].decode('utf-8')
                 # repack order
-                order_packed = msgpack.packb(order_unpacked, use_bin_type = True, default = default_conversion)
+                order_packed = msgpack.packb(order_unpacked, use_bin_type = True, default = default_packer)
                 # determine broker to send to
                 if (broker := order.get(c.BROKER)) is not None:
                     broker = broker

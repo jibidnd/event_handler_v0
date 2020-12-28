@@ -1,4 +1,7 @@
 import collections
+
+from msgpack import ext
+from utils.util_functions import ext_hook
 import uuid
 from decimal import Decimal
 import datetime
@@ -55,7 +58,7 @@ class Broker(event_handler.EventHandler):
         self.shutdown_flag = threading.Event()
         
         # clock is only used in "socket modes"
-        self.clock = 0.00
+        self.clock = Decimal(0.00)
     
     # ----------------------------------------------------------------------------------------
     # Connections
@@ -126,7 +129,7 @@ class Broker(event_handler.EventHandler):
             
             # emit the order if there are any fills
             for order in fills:
-                order_packed = msgpack.packb(order, use_bin_type = True, default = utils.default_conversion)
+                order_packed = msgpack.packb(order, use_bin_type = True, default = utils.default_packer)
                 self.order_socket.send(order_packed, flags = zmq.NOBLOCK)
 
         return self.handle_data(data)
@@ -140,7 +143,7 @@ class Broker(event_handler.EventHandler):
         order_response = self.take_order(order)
         if (order_response is not None) and (self.order_socket is not None):
             # emit the response if there is any
-            order_response_packed = msgpack.packb(order_response, use_bin_type = True, default = utils.default_conversion)
+            order_response_packed = msgpack.packb(order_response, use_bin_type = True, default = utils.default_packer)
             self.order_socket.send(order_response, flags = zmq.NOBLOCK)
         return self.handle_order(order)
 
@@ -148,6 +151,7 @@ class Broker(event_handler.EventHandler):
         pass
 
     def take_order(self, order):
+        print(order)
         if order[c.EVENT_SUBTYPE] == c.REQUESTED:
             if order[c.ORDER_TYPE] in [c.MARKET, c.LIMIT]:
                 # Add to open orders
@@ -229,7 +233,7 @@ class Broker(event_handler.EventHandler):
                 try:
                     # This is a SUB
                     topic, event = self.data_socket.recv_multipart(zmq.NOBLOCK)
-                    next_events[c.DATA_SOCKET] = msgpack.unpackb(event)
+                    next_events[c.DATA_SOCKET] = msgpack.unpackb(event, ext_hook = utils.ext_hook)
                 except zmq.ZMQError as exc:
                     # nothing to get
                     if exc.errno == zmq.EAGAIN:
@@ -242,7 +246,7 @@ class Broker(event_handler.EventHandler):
                 try:
                     # This is a dealer
                     order = self.order_socket.recv(zmq.NOBLOCK)
-                    order = msgpack.unpackb(order)
+                    order = msgpack.unpackb(order, ext_hook = utils.ext_hook)
                     next_events[c.ORDER_SOCKET] = order
                 except zmq.ZMQError as exc:
                     # nothing to get
