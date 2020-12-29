@@ -1,6 +1,5 @@
 import time
 import configparser
-from utils import util_functions
 
 import zmq
 import msgpack
@@ -10,7 +9,6 @@ from snowflake.connector.converter_null import SnowflakeNoConverterToPython
 
 from ..data import BaseDataFeed
 from .. import constants as c
-from .. import utils.util_functions as utils
 
 class SnowflakeDataFeed(BaseDataFeed):
 

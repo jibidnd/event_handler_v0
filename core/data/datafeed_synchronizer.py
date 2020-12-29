@@ -87,7 +87,7 @@ class DatafeedSynchronizer(BaseDataFeed):
             if (event := self.fetch()) is not None:
 
                 try:
-                    event_packed = msgpack.packb(event[1], use_bin_type = True, default = utils..default_packer)
+                    event_packed = msgpack.packb(event[1], use_bin_type = True, default = utils.default_packer)
                     self.sock_out.send_multipart([event[0].encode(), event_packed], flag = zmq.NOBLOCK)
                 except zmq.ZMQError as exc:
                     # Drop messages if queue is full

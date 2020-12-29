@@ -16,7 +16,7 @@ from .. import constants as c
 from .. import event_handler
 from ..event_handler import event, lines
 from .position import Position, CashPosition
-from ... import utils
+from .. import utils
 
 class Strategy(event_handler.EventHandler):
     def __init__(self, name = None, zmq_context = None, parent_address = None, children_addresses = None,
@@ -637,7 +637,6 @@ class Strategy(event_handler.EventHandler):
             self.open_positions[position_id]._handle_order(order)
 
         # place the order
-        print(order)
         if self.parent is None:
             self.order_socket.send(msgpack.packb(order, use_bin_type = True, default = utils.default_packer))
         else:

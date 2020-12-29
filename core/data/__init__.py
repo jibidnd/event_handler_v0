@@ -4,9 +4,7 @@ import msgpack
 import threading
 
 from .. import constants as c
-from ...utils.util_functions import get_free_tcp_address
-from ... import utils
-from utils import util_functions as utils
+from .. import utils
 
 class BaseDataFeed:
 

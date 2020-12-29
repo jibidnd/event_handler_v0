@@ -7,8 +7,7 @@ import time
 import zmq
 import msgpack
 
-from ..utils.util_functions import get_free_tcp_address, get_inproc_address, default_packer
-from .. import utils
+from . import utils
 
 from . import constants as c
 from .data.datafeed_synchronizer import DatafeedSynchronizer
@@ -136,21 +135,21 @@ class Session:
         addresses_used = []
 
         # all socket modes get a broker frontend
-        self.broker_strategy_address, _, _ = get_free_tcp_address(exclude = addresses_used)
+        self.broker_strategy_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
         addresses_used.append(self.broker_strategy_address)
 
         if socket_mode in [c.ALL, c.STRATEGIES_FULL]:
             # datafeed frontend
-            self.datafeed_subscriber_address, _, _ = get_free_tcp_address(exclude = addresses_used)
+            self.datafeed_subscriber_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
             addresses_used.append(self.datafeed_subscriber_address)
 
             # Also need to connect to datafeeds and brokers if running async (full sockets) mode
             if socket_mode == c.ALL:
                 # datafeed backend
-                self.datafeed_publisher_address, _, _ = get_free_tcp_address(exclude = addresses_used)
+                self.datafeed_publisher_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
                 addresses_used.append(self.datafeed_publisher_address)
                 # broker backend
-                self.broker_broker_address, _, _ = get_free_tcp_address(exclude = addresses_used)
+                self.broker_broker_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
                 addresses_used.append(self.broker_broker_address)
         elif socket_mode == c.STRATEGIES_LIMITED:
             pass
@@ -621,7 +620,7 @@ def proxy(address_data_backend, address_data_frontend, address_broker_backend, a
                 # add sender id to order as a string
                 order_unpacked[c.SENDER_ID] = next_event[0].decode('utf-8')
                 # repack order
-                order_packed = msgpack.packb(order_unpacked, use_bin_type = True, default = default_packer)
+                order_packed = msgpack.packb(order_unpacked, use_bin_type = True, default = utils.default_packer)
                 # determine broker to send to
                 if (broker := order.get(c.BROKER)) is not None:
                     broker = broker

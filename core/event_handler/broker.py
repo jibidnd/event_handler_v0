@@ -1,7 +1,6 @@
 import collections
 
 from msgpack import ext
-from utils.util_functions import ext_hook
 import uuid
 from decimal import Decimal
 import datetime
@@ -16,7 +15,7 @@ from .. import constants as c
 from .. import event_handler
 from ..event_handler import event, lines
 from .position import Position, CashPosition
-from ... import utils
+from .. import utils
 
 '''
     Needs:
@@ -151,7 +150,6 @@ class Broker(event_handler.EventHandler):
         pass
 
     def take_order(self, order):
-        print(order)
         if order[c.EVENT_SUBTYPE] == c.REQUESTED:
             if order[c.ORDER_TYPE] in [c.MARKET, c.LIMIT]:
                 # Add to open orders

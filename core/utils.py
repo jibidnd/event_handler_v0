@@ -197,13 +197,13 @@ def duration_to_sec(duration):
 def default_packer(obj):
     try:
         decimal.Decimal(obj)
-        return msgpack.ExtType(10, str(obj))
+        return msgpack.ExtType(10, str(obj).encode('utf-8'))
     except decimal.InvalidOperation:
         return str(obj)
     except:
         raise
 
 def ext_hook(ext_type_code, obj):
-    if code == 10:
-        return decimal.Decimal(obj)
+    if ext_type_code == 10:
+        return decimal.Decimal(obj.decode('utf-8'))
     return msgpack.ExtType(ext_type_code, obj)
