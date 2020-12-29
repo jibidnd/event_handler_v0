@@ -1,6 +1,7 @@
 '''
 A session coordinates instances of events, brokers, and strategies.
 '''
+from collections import deque
 import threading
 import operator
 import time
@@ -50,7 +51,7 @@ class Session:
         # main shutdown flag
         self.main_shutdown_flag = threading.Event()
     
-    def run(self, socket_mode = c.STRATEGIES_LIMITED):
+    def run(self, socket_mode = c.STRATEGIES_INTERNALONLY):
         """Whether/how to use sockets for this session.
 
         Args:
@@ -69,7 +70,7 @@ class Session:
                     - The `take_order` and `try_fill_with_data` methods of each broker is called in the main thread.
                         Order events are consolidated and synced before being relayed through the session's order socket.
                     - The behaviour of strategies is the same as if `socket_mode` = c.ALL.
-                If STRATEGIES_LIMITED:
+                If STRATEGIES_ORDERSONLY:
                     - The behaviours of datafeeds and brokers are the same as if `socket_mode` = c.STRATEGIES.
                     - The `_handle_event` method of strategies is called on each event.
                     - Sockets are only used to listen for orders from strategies.
@@ -77,7 +78,11 @@ class Session:
                         Communication between strategies is not changed. This mode is primarily for the purpose for backtesting, and to gurantee
                         that events are received and processed in the correct order. However, there is no reason why it wouldn't also
                         work in live mode.
-                Defaults to STRATEGIES_LIMITED.
+                If STRATEGIES_INTERNALONLY:
+                    - Strategies continue to communicate among themselves via sockets
+                    - All communications from the session to strategies, order or data, will be directly handled via the `_handle_event` method
+                        of the strategies.
+                Defaults to STRATEGIES_INTERNALONLY.
         """        
         
         self.setup_addresses(socket_mode)
@@ -100,7 +105,7 @@ class Session:
             for data_thread in self.datafeed_threads:
                 data_thread.join()
 
-        elif socket_mode in [c.STRATEGIES_FULL, c.STRATEGIES_LIMITED]:
+        elif socket_mode in [c.STRATEGIES_FULL, c.STRATEGIES_ORDERSONLY, c.STRATEGIES_INTERNALONLY]:
             self.process_events(socket_mode)
 
         else:
@@ -134,24 +139,24 @@ class Session:
         # inproc was found to be rather unstable for some reason, so we stick with tcp.
         addresses_used = []
 
-        # all socket modes get a broker frontend
-        self.broker_strategy_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
-        addresses_used.append(self.broker_strategy_address)
+        if socket_mode in [c.ALL, c.STRATEGIES_FULL, c.STRATEGIES_ORDERSONLY]:
+            self.broker_strategy_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
+            addresses_used.append(self.broker_strategy_address)
+        
+            if socket_mode in [c.ALL, c.STRATEGIES_FULL]:
+                # datafeed frontend
+                self.datafeed_subscriber_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
+                addresses_used.append(self.datafeed_subscriber_address)
 
-        if socket_mode in [c.ALL, c.STRATEGIES_FULL]:
-            # datafeed frontend
-            self.datafeed_subscriber_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
-            addresses_used.append(self.datafeed_subscriber_address)
-
-            # Also need to connect to datafeeds and brokers if running async (full sockets) mode
-            if socket_mode == c.ALL:
-                # datafeed backend
-                self.datafeed_publisher_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
-                addresses_used.append(self.datafeed_publisher_address)
-                # broker backend
-                self.broker_broker_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
-                addresses_used.append(self.broker_broker_address)
-        elif socket_mode == c.STRATEGIES_LIMITED:
+                # Also need to connect to datafeeds and brokers if running async (full sockets) mode
+                if socket_mode == c.ALL:
+                    # datafeed backend
+                    self.datafeed_publisher_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
+                    addresses_used.append(self.datafeed_publisher_address)
+                    # broker backend
+                    self.broker_broker_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
+                    addresses_used.append(self.broker_broker_address)
+        elif socket_mode == c.STRATEGIES_INTERNALONLY:
             pass
         else:
             raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
@@ -169,7 +174,7 @@ class Session:
             # Start the proxies
             for proxy_thread in self.proxy_threads:
                 proxy_thread.start()
-        elif socket_mode in [c.STRATEGIES_FULL, c.STRATEGIES_LIMITED]:
+        elif socket_mode in [c.STRATEGIES_FULL, c.STRATEGIES_ORDERSONLY, c.STRATEGIES_INTERNALONLY]:
             pass
         else:
             raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
@@ -193,7 +198,7 @@ class Session:
                 datafeed_thread.start()
 
         # If not running in full socket mode, set up the synced datafeed
-        elif socket_mode in [c.STRATEGIES_FULL, c.STRATEGIES_LIMITED]:
+        elif socket_mode in [c.STRATEGIES_FULL, c.STRATEGIES_ORDERSONLY, c.STRATEGIES_INTERNALONLY]:
             # if there is more than one datafeed, combine them with DatafeedSynchronizer
             if len(self.datafeeds) > 1:
                 self.synced_datafeed = DatafeedSynchronizer(datafeeds = self.datafeeds)
@@ -226,30 +231,37 @@ class Session:
                 broker_thread.daemon = True
                 self.broker_threads.append(broker_thread)
                 broker_thread.start()
-        
         # if strategies require sockets, also set them up
-        elif socket_mode in [c.STRATEGIES_FULL, c.STRATEGIES_LIMITED]:
+        elif socket_mode in [c.STRATEGIES_FULL, c.STRATEGIES_ORDERSONLY]:
             self.broker_strategy_socket = self.zmq_context.socket(zmq.ROUTER)
             self.broker_strategy_socket.bind(self.broker_strategy_address)
-
+        elif socket_mode == c.STRATEGIES_INTERNALONLY:
+            pass
         else:
             raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
 
         return
 
     def setup_strategies(self, socket_mode):
-        
+
         for strategy in self.strategies.values():
             strategy.zmq_context = self.zmq_context
-            strategy.connect_order_socket(self.broker_strategy_address)
 
-            if socket_mode == c.ALL:
-                strategy.connect_data_socket(self.datafeed_subscriber_address)
-                strategy_thread = threading.Thread(target = strategy.run)
-                strategy_thread.daemon = True
-                self.strategy_threads.append(strategy_thread)
-                strategy_thread.start()
-        
+            if socket_mode in [c.ALL, c.STRATEGIES_FULL, c.STRATEGIES_ORDERSONLY]:
+                strategy.connect_order_socket(self.broker_strategy_address)
+
+                if socket_mode in [c.ALL, c.STRATEGIES_FULL]:
+                    strategy.connect_data_socket(self.datafeed_subscriber_address)
+                    strategy_thread = threading.Thread(target = strategy.run)
+                    strategy_thread.daemon = True
+                    self.strategy_threads.append(strategy_thread)
+                    strategy_thread.start()
+            
+            elif socket_mode == c.STRATEGIES_INTERNALONLY:
+                pass
+            else:
+                raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
+
         return
 
     def shutdown(self, linger = 0.1):
@@ -288,27 +300,32 @@ class Session:
 
         if socket_mode == c.ALL:
             raise NotImplementedError('socket_mode = "ALL" is not implemented in process_events.')
-        elif socket_mode not in [c.STRATEGIES_FULL, c.STRATEGIES_LIMITED]:
+        elif socket_mode not in [c.STRATEGIES_FULL, c.STRATEGIES_ORDERSONLY, c.STRATEGIES_INTERNALONLY]:
             raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
 
-        while not self.main_shutdown_flag.is_set():
+        # the event queue
+        # use a deque as we may need to pop and append from both ends
+        next_events = deque()
 
-            # the event queue
-            next_events = []
+        while not self.main_shutdown_flag.is_set():
             
             # try to get (all) orders from strategies
-            while True:
-                try:
-                    strategy_id_encoded, order_packed = self.broker_strategy_socket.recv_multipart(zmq.NOBLOCK)
-                    order_unpacked = msgpack.unpackb(order_packed, ext_hook = utils.ext_hook)
-                    order_unpacked[c.SENDER_ID] = strategy_id_encoded.decode('utf-8')
-                    next_events.append(order_unpacked)
-                except zmq.ZMQError as exc:
-                    if exc.errno == zmq.EAGAIN:
-                        # nothing to get
-                        break
-                    else:
-                        raise
+            if socket_mode in [c.ALL, c.STRATEGIES_FULL, c.STRATEGIES_ORDERSONLY]:
+                while True:
+                    try:
+                        strategy_id_encoded, order_packed = self.broker_strategy_socket.recv_multipart(zmq.NOBLOCK)
+                        order_unpacked = msgpack.unpackb(order_packed, ext_hook = utils.ext_hook)
+                        order_unpacked[c.SENDER_ID] = strategy_id_encoded.decode('utf-8')
+                        next_events.append(order_unpacked)
+                    except zmq.ZMQError as exc:
+                        if exc.errno == zmq.EAGAIN:
+                            # nothing to get
+                            break
+                        else:
+                            raise
+            # otherwise order would have been returned via _handle_event, and would be already in next_events.
+            elif socket_mode == c.STRATEGIES_INTERNALONLY:
+                pass
             
             # Get next data event
             if (next_data := self.synced_datafeed.fetch(1)) is not None:
@@ -323,7 +340,9 @@ class Session:
             next_events = sorted(next_events, key = operator.itemgetter(c.EVENT_TS))
 
             # handle each event, in order
-            for event in next_events:
+            # iterating over range because we may append events to next_events
+            for i in range(len(next_events)):
+                event = next_events.pop(0)
 
                 # if the event is an order (from strategies)
                 if event[c.EVENT_TYPE] == c.ORDER:
@@ -344,8 +363,11 @@ class Session:
                             msg = self.broker_strategy_socket.send_multipart([original_sender_encoded, response_packed], copy = False, track = True)
                             msg.wait()
                         # otherwise directly have the strategy handle the event
-                        elif socket_mode == c.STRATEGIES_LIMITED:
+                        elif socket_mode == c.STRATEGIES_ORDERSONLY:
                             self.strategies[event[c.SENDER_ID]]._handle_event(event)
+                        elif socket_mode == c.STRATEGIES_INTERNALONLY:
+                            if (response := self.strategies[event[c.SENDER_ID]]._handle_event(event)) is not None:
+                                next_events.append(response)
                         else:
                             raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
 
@@ -356,18 +378,20 @@ class Session:
                     for broker in self.brokers.values():
                         if (fills := broker.try_fill_with_data(event)) is not None:
                             for fill in fills:
-                                # if STRATEGIES_FULL, send order response to socket
+                                # if STRATEGIES_FULL, send order response via the socket
                                 if socket_mode == c.STRATEGIES_FULL:
                                     # prepare the response
                                     response_packed = msgpack.packb(fill, default = utils.default_packer)
                                     original_sender = fill[c.SENDER_ID]
                                     original_sender_encoded = original_sender.encode('utf-8')
-                                    # print('order filled in session')
                                     msg = self.broker_strategy_socket.send_multipart([original_sender_encoded, response_packed], copy = False, track = True)
                                     msg.wait()
                                 # otherwise directly have the strategy handle the event
-                                elif socket_mode == c.STRATEGIES_LIMITED:
+                                elif socket_mode == c.STRATEGIES_ORDERSONLY:
                                     self.strategies[fill[c.SENDER_ID]]._handle_event(fill)
+                                elif socket_mode == c.STRATEGIES_INTERNALONLY:
+                                    if (response := self.strategies[fill[c.SENDER_ID]]._handle_event(fill)) is not None:
+                                        next_events.append(response)
                                 else:
                                     raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
 
@@ -379,10 +403,17 @@ class Session:
                         # print('data event in session')
                         msg = self.data_subscriber_socket.send_multipart([topic_encoded, event_packed], copy = False, track = True)
                         msg.wait()
-                    elif socket_mode == c.STRATEGIES_LIMITED:
+                    elif socket_mode == c.STRATEGIES_ORDERSONLY:
                         for strategy in self.strategies.values():
                             if event[c.TOPIC] in strategy.data_subscriptions:
                                 strategy._handle_event(event)
+                    elif socket_mode == c.STRATEGIES_INTERNALONLY:
+                        for strategy_id, strategy in self.strategies.items():
+                            if event[c.TOPIC] in strategy.data_subscriptions:
+                                if (response := strategy._handle_event(event)) is not None:
+                                    response.update({c.SENDER_ID: strategy_id})
+                                    print(response)
+                                    next_events.append(response)
                     else:
                         raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
         

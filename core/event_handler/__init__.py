@@ -34,16 +34,17 @@ class EventHandler(abc.ABC):
         except KeyError:
             raise Exception('Event type not specified')
         
+        self.handle_event(event)
+
         if event_type == c.DATA:
-            self._handle_data(event)
+            return self._handle_data(event)
         elif event_type == c.ORDER:
-            self._handle_order(event)
+            return self._handle_order(event)
         elif event_type == c.COMMAND:
-            self._handle_command(event)
+            return self._handle_command(event)
         else:
             raise Exception('Event type {} not supported.'.format(event_type))
-        
-        return self.handle_event(event)
+
     
     @abc.abstractmethod
     def _handle_data(self, data):

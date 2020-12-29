@@ -319,7 +319,7 @@ class Strategy(event_handler.EventHandler):
         # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
         if (tempts := event[c.EVENT_TS]) > self.clock.timestamp():
             self.clock = utils.unix2datetime(tempts)
-        super()._handle_event(event)
+        return super()._handle_event(event)
 
 
 
@@ -335,7 +335,6 @@ class Strategy(event_handler.EventHandler):
         # If a line exists, update it
         if self.datas.get(symbol) is not None:
             self.datas[symbol].update_with_data(data)
-
         return self.handle_data(data)
 
     def _handle_order(self, order):
@@ -378,7 +377,6 @@ class Strategy(event_handler.EventHandler):
         # otherwise it is an order resolution for self. Update positions
             # update the positions that the order came from
             self.open_positions[order.get(c.POSITION_ID)]._handle_event(order)
-            # update cash
             self.cash._handle_event(order)
         
         return self.handle_order(order)
@@ -632,15 +630,22 @@ class Strategy(event_handler.EventHandler):
         pass_through = (str(order[c.STRATEGY_ID]) != str(self.strategy_id))
         assert (position_id := order.get(c.POSITION_ID)) is not None, 'Order must belong to a position.'
 
-        # Update the position with the order
         if not pass_through:
+            # Update the position with the order
             self.open_positions[position_id]._handle_order(order)
-
+            # update cash
+            self.cash._handle_event(order)
+        
         # place the order
         if self.parent is None:
-            self.order_socket.send(msgpack.packb(order, use_bin_type = True, default = utils.default_packer))
+            if self.order_socket is not None:
+                self.order_socket.send(msgpack.packb(order, use_bin_type = True, default = utils.default_packer))
+            # return order for no socket modes
+            return order
         else:
             self.to_parent(order)
+        
+        return
     
     def deny_order(self, order):
         '''
