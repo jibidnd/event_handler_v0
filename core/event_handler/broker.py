@@ -143,7 +143,7 @@ class Broker(event_handler.EventHandler):
         if (order_response is not None) and (self.order_socket is not None):
             # emit the response if there is any
             order_response_packed = msgpack.packb(order_response, use_bin_type = True, default = utils.default_packer)
-            self.order_socket.send(order_response, flags = zmq.NOBLOCK)
+            self.order_socket.send(order_response_packed, flags = zmq.NOBLOCK)
         return self.handle_order(order)
 
     def handle_order(self, order):

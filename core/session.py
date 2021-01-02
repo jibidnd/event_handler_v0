@@ -168,7 +168,8 @@ class Session:
         if socket_mode == c.ALL:
             self.proxy_threads.append(threading.Thread(target = pub_sub_proxy, args = (self.datafeed_publisher_address, self.datafeed_subscriber_address, 
                                                                                         self.datafeed_capture_address, self.zmq_context, self.main_shutdown_flag)))
-            # Add broker proxy to proxy threadsdefault_broker = self.brokers[0].name if len(self.brokers) > 0 else None
+            # Add broker proxy to proxy threads
+            default_broker = next(iter(self.brokers.values())).name if len(self.brokers) > 0 else None
             self.proxy_threads.append(threading.Thread(target = broker_proxy, args = (self.broker_strategy_address, self.broker_broker_address,
                                                                                         self.broker_capture_address, self.zmq_context, self.main_shutdown_flag, default_broker)))
             # Start the proxies
@@ -412,7 +413,6 @@ class Session:
                             if event[c.TOPIC] in strategy.data_subscriptions:
                                 if (response := strategy._handle_event(event)) is not None:
                                     response.update({c.SENDER_ID: strategy_id})
-                                    print(response)
                                     next_events.append(response)
                     else:
                         raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
@@ -530,7 +530,7 @@ def broker_proxy(address_frontend, address_backend, capture = None, context = No
                     raise Exception('Either specify broker in order or specify default broker in session.')
                 
                 # send the order to the broker: (broker name, )
-                backend.send_multipart([broker.encode('utf-8'), msgpack.packb(order, utils.default_packer)])
+                backend.send_multipart([broker.encode('utf-8'), msgpack.packb(order, default = utils.default_packer)])
 
             elif socks.get(backend) == zmq.POLLIN:
                 # received order from broker: (broker ident, (strategy ident, order))

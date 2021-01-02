@@ -198,7 +198,7 @@ def default_packer(obj):
     try:
         decimal.Decimal(obj)
         return msgpack.ExtType(10, str(obj).encode('utf-8'))
-    except decimal.InvalidOperation:
+    except (decimal.InvalidOperation, TypeError):
         return str(obj)
     except:
         raise
