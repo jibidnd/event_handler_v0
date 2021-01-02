@@ -4,7 +4,7 @@
 import abc
 import collections
 import uuid
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import datetime
 import pytz
 import time
@@ -16,7 +16,7 @@ from .. import constants as c
 from .. import event_handler
 from ..event_handler import event, lines
 from .position import Position, CashPosition
-from ... import utils
+from .. import utils
 
 class Strategy(event_handler.EventHandler):
     def __init__(self, name = None, zmq_context = None, parent_address = None, children_addresses = None,
@@ -47,7 +47,7 @@ class Strategy(event_handler.EventHandler):
         self.open_trades = {}           # trade_id: [position_ids]
         self.closed_trades = {}         # trade_id: [position_ids]
         self.open_positions = {}        # position_id: position object
-        self.closed_positions = {}      # position_id: position object
+        self.closed_positions = {}      # position_id: position object  # TODO: closed positions need to be moved to closed_positions from open_positions
         # TODO
         self.pending_orders = {}        # orders not yet filled: order_id: order_event
 
@@ -186,8 +186,8 @@ class Strategy(event_handler.EventHandler):
         """
         # if child_strategy is provided, attempt to get these information
         if child_strategy is not None:
-            child_strategy_id = child_strategy.get('strategy_id')
-            child_address = child_strategy.get('strategy_address')
+            child_strategy_id = child_strategy.get(c.STRATEGY_ID)
+            child_address = child_strategy.get(c.STRATEGY_ADDRESS)
         
         assert (child_strategy_id) is not None, 'Need child_strategy_id and child_address info.'
         
@@ -259,7 +259,7 @@ class Strategy(event_handler.EventHandler):
                             topic, event = socket.recv_multipart(zmq.NOBLOCK)
                         elif socket.socket_type in [zmq.DEALER]:
                             event = socket.recv(zmq.NOBLOCK)
-                        next_events[name] = msgpack.unpackb(event)
+                        next_events[name] = msgpack.unpackb(event, ext_hook = utils.ext_hook)
                     except zmq.ZMQError as exc:
                         if exc.errno == zmq.EAGAIN:
                             # Nothing to grab
@@ -269,15 +269,10 @@ class Strategy(event_handler.EventHandler):
                 
             # Now we can sort the upcoming events and handle the next event
             if len(next_events) > 0:
-                # Run code that needs to be executed bofore handling any event            
-                self._prenext()
                 # Handle the socket with the next soonest event (by EVENT_TS)
                 # take the first item (socket name) of the first item ((socket name, event)) of the sorted queue
                 next_socket = sorted(next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
                 next_event = next_events.pop(next_socket)        # remove the event from next_events
-                # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
-                if (tempts := next_event[c.EVENT_TS]) > self.clock.timestamp():
-                    self.clock = utils.unix2datetime(tempts)
                 self._handle_event(next_event)
 
     def before_stop(self):
@@ -313,8 +308,20 @@ class Strategy(event_handler.EventHandler):
             data = self.datas[symbol]
             # has it been a while since we had the last mark?
             if (len(data) == 0) or (self.clock - data[c.EVENT_TS[-1]]):
-                self.to_child(child, c.MARK)
+                self.to_child(symbol, c.MARK)
         return self.prenext()
+    
+    def _handle_event(self, event):
+
+        # Run code that needs to be executed bofore handling any event            
+        self._prenext()
+
+        # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
+        if (tempts := event[c.EVENT_TS]) > self.clock.timestamp():
+            self.clock = utils.unix2datetime(tempts)
+        return super()._handle_event(event)
+
+
 
     def _handle_data(self, data):
         '''Update lines in self.datas with data event'''
@@ -328,7 +335,6 @@ class Strategy(event_handler.EventHandler):
         # If a line exists, update it
         if self.datas.get(symbol) is not None:
             self.datas[symbol].update_with_data(data)
-
         return self.handle_data(data)
 
     def _handle_order(self, order):
@@ -345,7 +351,7 @@ class Strategy(event_handler.EventHandler):
                 is published to the child that requested that order.
         2) Result of a prior order sent
             - If the order is of subtype in [DENIED, SUBMITTED, FAILED,
-                                                RECEIVED, FILLED, EXPIRED,
+                                                RECEIVED, FILLED, PARTIALLY_FILLED, EXPIRED,
                                                 CANCELLED, REJECTED]
                 (which implies that the origin of the order is from this strategy),
                 the order is sent to the corresponding position to update the position.
@@ -371,7 +377,6 @@ class Strategy(event_handler.EventHandler):
         # otherwise it is an order resolution for self. Update positions
             # update the positions that the order came from
             self.open_positions[order.get(c.POSITION_ID)]._handle_event(order)
-            # update cash
             self.cash._handle_event(order)
         
         return self.handle_order(order)
@@ -570,7 +575,7 @@ class Strategy(event_handler.EventHandler):
         self.open_positions[position.position_id] = position
         return position
 
-    def create_order(self, symbol, quantity, order_type = c.MARKET, position = None, order_details = {}):
+    def create_order(self, symbol, quantity, position = None, order_details = {}):
         '''Note that order does not impact strategy until it is actually placed'''
         if position is None:
             # If there is a position with the symbol already, use the latest one of the positions with the same symbol
@@ -594,13 +599,23 @@ class Strategy(event_handler.EventHandler):
             c.POSITION_ID: position.position_id,
             c.ORDER_ID: str(uuid.uuid1()),
             c.SYMBOL: position.symbol,
+            c.ORDER_TYPE: c.MARKET,
             c.QUANTITY: quantity,
             c.EVENT_TS: self.clock.timestamp(),
             c.PRICE: self.get_mark(symbol) or 0.0,
             c.QUANTITY_OPEN: quantity
             }
         
-        return event.order_event({**default_order_details, **order_details})
+        order = {**default_order_details, **order_details}
+        for key, value in order.items():
+            try:
+                order.update({key: Decimal(value)})
+            except InvalidOperation:
+                pass
+            except:
+                raise
+        
+        return event.order_event(order)
 
     def place_order(self, order):
         '''
@@ -615,15 +630,22 @@ class Strategy(event_handler.EventHandler):
         pass_through = (str(order[c.STRATEGY_ID]) != str(self.strategy_id))
         assert (position_id := order.get(c.POSITION_ID)) is not None, 'Order must belong to a position.'
 
-        # Update the position with the order
         if not pass_through:
+            # Update the position with the order
             self.open_positions[position_id]._handle_order(order)
-
+            # update cash
+            self.cash._handle_event(order)
+        
         # place the order
         if self.parent is None:
-            self.order_socket.send(msgpack.packb(order, use_bin_type = True, default = default_msgpack_packer))
+            if self.order_socket is not None:
+                self.order_socket.send(msgpack.packb(order, use_bin_type = True, default = utils.default_packer))
+            # return order for no socket modes
+            return order
         else:
             self.to_parent(order)
+        
+        return
     
     def deny_order(self, order):
         '''
@@ -670,12 +692,6 @@ class Strategy(event_handler.EventHandler):
 # ----------------------------------------------------------------------------------------------------
 # Misc Classes and fucntions
 # ----------------------------------------------------------------------------------------------------
-
-def default_msgpack_packer(obj):
-    try:
-        return float(obj)
-    except:
-        return str(obj)
 
 class RMS(abc.ABC):
     '''A risk management system that monitors risk and approves/denies order requests'''

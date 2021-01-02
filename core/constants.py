@@ -25,7 +25,9 @@ FAILED = 'FAILED'    # Order is submitted to the broker but no RECEIVED message 
 
 # from broker
 RECEIVED = 'RECEIVED'           # order is received by the broker
-FILLED = 'FILLED'               # order is filled (complete or partial)
+FILLED = 'FILLED'               # order is filled (complete)
+PARTIALLY_FILLED = \
+    'PARTIALLY_FILLED'          # order is filled (partial)
 EXPIRED = 'EXPIRED'             # order is expired
 CANCELLED = 'CANCELLED'         # order has been cancelled
 REJECTED = 'REJECTED'           # order is rejected
@@ -71,6 +73,7 @@ LOW = 'LOW'
 CLOSE = 'CLOSE'
 PRICE = 'PRICE'
 MARK = 'MARK'
+TOPIC = 'TOPIC'
 
 # Asset classes
 # STRATEGY = 'STRATEGY'
@@ -142,16 +145,33 @@ POSITION_ID = 'POSITION_ID'
 ORDER_ID = 'ORDER_ID'
 EVENT_ID = 'EVENT_ID'
 SENDER_ID = 'SENDER_ID'
+STRATEGY_ADDRESS = 'STRATEGY_ADDRESS'
+
 # Order keys
+# from request
 SYMBOL = 'SYMBOL'
 ORDER_TYPE = 'ORDER_TYPE'
 PRICE = 'PRICE'
 QUANTITY = 'QUANTITY'
+BROKER = 'BROKER'
+# incremental
 CREDIT = 'CREDIT'
 DEBIT = 'DEBIT'
 NET = 'NET'
-BROKER = 'BROKER'
 COMMISSION = 'COMMISSION'
-QUANTITY_OPEN = 'QUANTITY_OPEN'
 QUANTITY_FILLED = 'QUANTITY_FILLED'
 AVERAGE_PRICE = 'AVERAGE_PRICE'
+# cumulative
+CREDIT_TOTAL = 'CREDIT_TOTAL'
+DEBIT_TOTAL = 'DEBIT_TOTAL'
+NET_TOTAL = 'NET_TOTAL'
+COMMISSION_TOTAL = 'COMMISSION_TOTAL'
+QUANTITY_OPEN = 'QUANTITY_OPEN'
+QUANTITY_FILLED_TOTAL = 'QUANTITY_FILLED_TOTAL'
+AVERAGE_PRICE_TOTAL = 'AVERAGE_PRICE_TOTAL'
+
+# session socket modes
+ALL = 'ALL'
+STRATEGIES_FULL = 'STRATEGIES_FULL'
+STRATEGIES_ORDERSONLY = 'STRATEGIES_ORDERSONLY'
+STRATEGIES_INTERNALONLY = 'STRATEGIES_INTERNALONLY'

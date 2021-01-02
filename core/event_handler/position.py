@@ -159,7 +159,7 @@ class CashPosition(event_handler.EventHandler):
                 # order are assumed to be received when submitted
                 # A FAILED order event would indicate otherwise
                 pass
-            elif event_subtype == c.FILLED:
+            elif event_subtype in [c.FILLED, c.PARTIALLY_FILLED]:
                 # Update open quantity
                 self.balance -= order[c.COMMISSION]
                 self.balance += order[c.NET]

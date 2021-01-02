@@ -60,14 +60,20 @@ class SnowflakeDataFeed(BaseDataFeed):
             res = self.cur.fetchmany(limit)
         
         # add topic to results
-        res_with_topic = [(self.topic, res_i) for res_i in res]
+        for res_i in res:
+            res_i.update({c.TOPIC: self.topic})
 
         # set flag if nothing else to get
-        if len(res_with_topic) == 0:
+        if len(res) == 0:
             self.is_finished = True
-            return res_with_topic
+            return
         
-        return res_with_topic
+        # return a list only if limit > 1
+        if limit > 1:
+            return res
+        elif limit == 1:
+            return res[0]
+
 
     def publish(self):
 
@@ -89,7 +95,7 @@ class SnowflakeDataFeed(BaseDataFeed):
 
             if res is not None:
                 # msgpack
-                res_packed = msgpack.packb(res, use_bin_type = True, default = self.default_conversion)
+                res_packed = msgpack.packb(res, use_bin_type = True, default = utils.default_packer)
                 tempts = res[c.EVENT_TS]
                 # send the event with a topic
                 try:
@@ -101,7 +107,7 @@ class SnowflakeDataFeed(BaseDataFeed):
                     else:
                         # unexpected error: shutdown and raise
                         self.shutdown()
-                        # sock.send_multipart([b'', msgpack.packb(stopping_event, use_bin_type = True, default = self.default_conversion)])
+                        # sock.send_multipart([b'', msgpack.packb(stopping_event, use_bin_type = True, default = self.default_packer)])
                         raise
                 except zmq.ContextTerminated:
                     # context is being closed by session
@@ -114,7 +120,7 @@ class SnowflakeDataFeed(BaseDataFeed):
                 self.shutdown()
 
                 # stopping_event.update({c.EVENT_TS: tempts})
-                # stopping_event = msgpack.packb(stopping_event, use_bin_type = True, default = self.default_conversion)
+                # stopping_event = msgpack.packb(stopping_event, use_bin_type = True, default = self.default_packer)
                 # self.sock_out.send_multipart([b'', stopping_event])
                 break
         

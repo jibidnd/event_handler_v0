@@ -4,7 +4,7 @@ import msgpack
 import threading
 
 from .. import constants as c
-from ...utils.util_functions import get_free_tcp_address
+from .. import utils
 
 class BaseDataFeed:
 
@@ -43,6 +43,11 @@ class BaseDataFeed:
         self.shutdown_flag = threading.Event()
 
     def publish_to(self, address):
+        """tell the datafeed where to publish to (if publishing is desired).
+
+        Args:
+            address (str): socket to publish data to
+        """
         self.address = address
         
         # Connect to a port
@@ -51,17 +56,11 @@ class BaseDataFeed:
         #    a multiple publisher (datafeeds) - one subscriber (session) pattern
         self.sock_out.connect(address)
 
-    @abc.abstractmethod
-    def publish(self):
-        pass
-    
-    @abc.abstractmethod
-    def fetch(self, limit = None):
+    def execute_query(self):
         pass
 
-    @staticmethod
-    def default_conversion(obj):
-        try:
-            return float(obj)
-        except:
-            return str(obj)
+    def fetch(self, limit = 1):
+        pass
+        
+    def publish(self):
+        pass
