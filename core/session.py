@@ -420,6 +420,72 @@ class Session:
         # Done processing all data events; close things
         self.shutdown()
         
+def strategy_proxy(address, capture = None, context = None, shutdown_flag = None):
+    '''Proxy to facilitate inter-strategy communication.
+        
+        Instead of each parent having their own address that children can connect to,
+            all strategies will connect to a proxy socket that relays messages between
+            strategies.
+        The proxy will add the identity of the sender to the message, and sends the (updated)
+            mesage to the strategy indicated by the c.RECEIVER_ID field in the message.
+        
+        The proxy is a ZMQ_ROUTER socket that binds to the address.
+        Strategies should connect to the address as ZMQ_DEALER sockets.
+
+        A message will look like:
+        {
+            c.SENDER_ID: sender id,   # will be filled in by proxy
+            c.RECEIVER_ID: receiver id,
+            c.EVENT_TYPE: c.COMMUNICATION,
+            c.EVENV_SUBTYPE: c.INFO or c.ACTION,
+            c.MESSAGE: "xxxx..."
+        }
+
+    '''
+    context = context or zmq.Context.Instance()
+
+    message_router = context.socket(zmq.ROUTER)
+    message_router.bind(address)
+
+    # # if there is a capture socket
+    # if capture:
+    #     # bind to capture address
+    #     capture_socket = context.socket(zmq.PUB)
+    #     capture_socket.bind(capture)
+    # else:
+    #     capture_socket = None
+
+    poller = zmq.Poller()
+    poller.register(message_router, zmq.POLLIN)
+
+    while not shutdown_flag.is_set():
+
+        try:
+            socks = dict(poller.poll(timeout = 10))
+            
+            if socks.get(message_router) == zmq.POLLIN:
+                # received message from strategy: (strategy ident, order)
+                strategy_id_encoded, message_packed = message_router.recv_multipart()
+                message_unpacked = msgpack.unpackb(message_packed, ext_hook = utils.ext_hook)
+                message_unpacked[c.SENDER_ID] = strategy_id_encoded.decode('utf-8')
+                
+                # find out which strategy to send to
+                if (receiver := message_unpacked.get(c.RECEIVER_ID)) is None:
+                    raise Exception('No receiver for message specified')
+                
+                # send the message to the receiver
+                message_router.send_multipart([receiver.encode('utf-8'), msgpack.packb(message_unpacked, default = utils.default_packer)])
+
+        except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
+            message_router.close(linger = 10)
+        except:
+            raise
+
+    # exit gracefully
+    if shutdown_flag.is_set():
+        message_router.close(linger = 10)
+
+    return
 
 
 def pub_sub_proxy(address_in, address_out, capture = None, context = None, shutdown_flag = None):
