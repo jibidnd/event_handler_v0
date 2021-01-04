@@ -108,7 +108,7 @@ class Broker(event_handler.EventHandler):
         # Create a logging socket if none exists yet
         if not self.logging_socket:
             socket = self.zmq_context.socket(zmq.DEALER)
-            socket.setsockopt(zmq.IDENTITY, self.strategy_id.encode())
+            socket.setsockopt(zmq.IDENTITY, self.broker_id.encode())
             self.logging_socket = socket
         self.logging_socket.conenct(logging_address)
 
