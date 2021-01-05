@@ -230,8 +230,8 @@ class Broker(event_handler.EventHandler):
             if next_events.get(c.DATA_SOCKET) is None:
                 try:
                     # This is a SUB
-                    topic, event = self.data_socket.recv_multipart(zmq.NOBLOCK)
-                    next_events[c.DATA_SOCKET] = msgpack.unpackb(event, ext_hook = utils.ext_hook)
+                    topic, event_packed = self.data_socket.recv_multipart(zmq.NOBLOCK)
+                    next_events[c.DATA_SOCKET] = msgpack.unpackb(event_packed, ext_hook = utils.ext_hook)
                 except zmq.ZMQError as exc:
                     # nothing to get
                     if exc.errno == zmq.EAGAIN:
@@ -243,9 +243,9 @@ class Broker(event_handler.EventHandler):
             if next_events.get(c.ORDER_SOCKET) is None:
                 try:
                     # This is a dealer
-                    order = self.order_socket.recv(zmq.NOBLOCK)
-                    order = msgpack.unpackb(order, ext_hook = utils.ext_hook)
-                    next_events[c.ORDER_SOCKET] = order
+                    order_packed = self.order_socket.recv(zmq.NOBLOCK)
+                    order_unpacked = msgpack.unpackb(order_packed, ext_hook = utils.ext_hook)
+                    next_events[c.ORDER_SOCKET] = order_unpacked
                 except zmq.ZMQError as exc:
                     # nothing to get
                     if exc.errno == zmq.EAGAIN:

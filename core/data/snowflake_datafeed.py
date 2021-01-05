@@ -126,6 +126,8 @@ class SnowflakeDataFeed(BaseDataFeed):
         
         # shut down gracefully
         self.shutdown()
+
+        return
     
     def shutdown(self):
         self.shutdown_flag.set()

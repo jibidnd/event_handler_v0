@@ -195,6 +195,8 @@ def duration_to_sec(duration):
 
 
 def default_packer(obj):
+    if isinstance(obj, datetime.datetime):
+        obj = obj.timestamp()
     try:
         decimal.Decimal(obj)
         return msgpack.ExtType(10, str(obj).encode('utf-8'))

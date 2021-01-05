@@ -126,8 +126,8 @@ class CashPosition(event_handler.EventHandler):
     """A position in cash. Handles order a little differently than other positions
     """
     def __init__(self):
-        self.balance = 0
-        self.net_flow = 0    # the net deposit/withdrawals to this cash position
+        self.balance = 0        # updated on fills
+        self.net_flow = 0       # the net deposit/withdrawals to this cash position
         self.value_pending = 0
         self.transactions = collections.deque(maxlen = None)
     

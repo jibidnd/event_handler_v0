@@ -53,6 +53,7 @@ class Session:
         self.communication_address = None
         self.communication_deque = deque()
         self.communication_socket_emulator = SocketEmulator(self.communication_deque)
+        self.communication_capture_address = None
 
         # Proxies
         self.proxy_threads = []
@@ -185,6 +186,9 @@ class Session:
 
     def setup_proxies(self, socket_mode):
 
+        # clear proxies
+        self.proxy_threads = []
+
         if socket_mode == c.ALL:
             self.proxy_threads.append(threading.Thread(target = pub_sub_proxy, args = (self.datafeed_publisher_address, self.datafeed_subscriber_address, 
                                                                                         self.datafeed_capture_address, self.zmq_context, self.main_shutdown_flag)))
@@ -193,7 +197,7 @@ class Session:
             self.proxy_threads.append(threading.Thread(target = broker_proxy, args = (self.broker_strategy_address, self.broker_broker_address,
                                                                                         self.broker_capture_address, self.zmq_context, self.main_shutdown_flag, default_broker)))
             # Add communication_proxy to proxy threads
-            self.proxy_threads.append(threading.Thread(target = communication_proxy, args = (self.communication_address)))
+            self.proxy_threads.append(threading.Thread(target = communication_proxy, args = (self.communication_address, self.communication_capture_address, self.zmq_context, self.main_shutdown_flag)))
 
             # Start the proxies
             for proxy_thread in self.proxy_threads:
@@ -334,13 +338,13 @@ class Session:
         # proxies, brokers, and strategies should all be ready to process events
             self.datafeed_start_sync.set()
             # wait for datafeeds to finishfor data_thread in self.datafeed_threads:
-            for data_thread in self.data_threads:
-                data_thread.join()
+            for datafeed_thread in self.datafeed_threads:
+                datafeed_thread.join()
         
         elif self.socket_mode in [c.STRATEGIES_FULL, c.STRATEGIES_INTERNALONLY, c.NONE]:
             self.process_events(self.socket_mode)
         else:
-            raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
+            raise NotImplementedError(f'socket_mode {self.socket_mode} not implemented')
 
     def shutdown(self, linger = 0.1):
         # exiting gracefully
@@ -568,7 +572,7 @@ def broker_proxy(address_frontend, address_backend, capture = None, context = No
         strategy: dealer: receives order
     
     '''
-    context = context or zmq.Context.Instance()
+    context = context or zmq.Context.instance()
 
     # establish strategy facing socket
     frontend = context.socket(zmq.ROUTER)
@@ -607,14 +611,14 @@ def broker_proxy(address_frontend, address_backend, capture = None, context = No
                     raise Exception('Either specify broker in order or specify default broker in session.')
                 
                 # send the order to the broker: (broker name, )
-                backend.send_multipart([broker.encode('utf-8'), msgpack.packb(order_packed, default = utils.default_packer)])
+                backend.send_multipart([broker.encode('utf-8'), order_packed])
 
             elif socks.get(backend) == zmq.POLLIN:
                 # received order from broker: (broker ident, (strategy ident, order))
                 broker_encoded, order_packed = backend.recv_multipart()
                 order_unpacked = msgpack.unpackb(order_packed, ext_hook = utils.ext_hook)
                 send_to = order_unpacked[c.STRATEGY_CHAIN].pop()
-                frontend.send_multipart([send_to.encode('utf-8'), order_packed])
+                frontend.send_multipart([send_to.encode('utf-8'), msgpack.packb(order_unpacked, default = utils.default_packer)])
 
         except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
             frontend.close(linger = 10)
@@ -649,7 +653,7 @@ def communication_proxy(address, capture = None, context = None, shutdown_flag =
         }
 
     '''
-    context = context or zmq.Context.Instance()
+    context = context or zmq.Context.instance()
 
     message_router = context.socket(zmq.ROUTER)
     message_router.bind(address)
@@ -666,16 +670,13 @@ def communication_proxy(address, capture = None, context = None, shutdown_flag =
     poller.register(message_router, zmq.POLLIN)
 
     while not shutdown_flag.is_set():
-
         try:
-            socks = dict(poller.poll(timeout = 10))
-            
+            socks = dict(poller.poll())
             if socks.get(message_router) == zmq.POLLIN:
                 # received message from strategy: (strategy ident, order)
                 strategy_id_encoded, message_packed = message_router.recv_multipart()
                 message_unpacked = msgpack.unpackb(message_packed, ext_hook = utils.ext_hook)
-                message_unpacked[c.SENDER_ID] = strategy_id_encoded.decode('utf-8')
-                
+                # message_unpacked[c.SENDER_ID] = strategy_id_encoded.decode('utf-8')
                 # find out which strategy to send to
                 if (receiver := message_unpacked.get(c.RECEIVER_ID)) is None:
                     raise Exception('No receiver for message specified')
@@ -696,7 +697,9 @@ def communication_proxy(address, capture = None, context = None, shutdown_flag =
 
 class SocketEmulator:
     def __init__(self, deq = None):
-        """A class to emulate strategy sockets for communication when zmq is not desired
+        """A class to emulate strategy sockets for communication when zmq is not desired.
+            Doesn't fully emulate dealer-router type sockets, as one cannot extract the sender identity.
+            Sender should include SENDER_ID or RECEIVER_ID in the message in those cases.
 
         Args:
             deq (collection.deque instance, optional): The deque to append received events to. Defaults to None.
@@ -707,6 +710,10 @@ class SocketEmulator:
             self.deq = deque()
 
     def send(self, item):
+        self.deq.append(msgpack.unpackb(item, ext_hook = utils.ext_hook))
+    
+    def send_multipart(self, items):
+        item = items[1]
         self.deq.append(msgpack.unpackb(item, ext_hook = utils.ext_hook))
 
     def recv(self):
