@@ -184,7 +184,7 @@ def duration_to_sec(duration):
         return 60.0
     elif duration == 'h':
         return 60.0 * 60.0
-    elif duraiton == 'D':
+    elif duration == 'D':
         return 60.0 * 60.0 * 24.0
     elif duration == 'W':
         return 60.0 * 60.0 * 24.0 * 7
@@ -193,10 +193,15 @@ def duration_to_sec(duration):
     elif duration == 'Y':
         return 60.0 * 60.0 * 24.0 * 7 * 365.25
 
+def packb(obj):
+    msgpack.packb(obj, default = default_packer)
+
+def unpackb(obj):
+    msgpack.unpackb(obj, ext_hook = ext_hook)
 
 def default_packer(obj):
-    if isinstance(obj, datetime.datetime):
-        obj = obj.timestamp()
+    # if isinstance(obj, datetime.datetime):
+    #     obj = obj.timestamp()
     try:
         decimal.Decimal(obj)
         return msgpack.ExtType(10, str(obj).encode('utf-8'))

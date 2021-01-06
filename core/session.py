@@ -104,7 +104,7 @@ class Session:
 
         self.start()
 
-        time.sleep(0.1)
+        time.sleep(1)
 
         # exit gracefully
         self.shutdown()
@@ -295,6 +295,7 @@ class Session:
 
         for strategy in self.strategies.values():
             strategy.zmq_context = self.zmq_context
+            strategy.shutdown_flag = self.main_shutdown_flag
 
             if socket_mode in [c.ALL, c.STRATEGIES_FULL]:
                 
@@ -359,9 +360,9 @@ class Session:
         for strategy in self.strategies.values():
             strategy.stop()
         
-        # wait for the strategies to exit clean
-        for strategy_thread in self.strategy_threads:
-            strategy_thread.join()
+        # # wait for the strategies to exit clean
+        # for strategy_thread in self.strategy_threads:
+        #     strategy_thread.join()
 
         # wait a second before terminating the context
         time.sleep(linger)
@@ -619,7 +620,6 @@ def broker_proxy(address_frontend, address_backend, capture = None, context = No
                 order_unpacked = msgpack.unpackb(order_packed, ext_hook = utils.ext_hook)
                 send_to = order_unpacked[c.STRATEGY_CHAIN].pop()
                 frontend.send_multipart([send_to.encode('utf-8'), msgpack.packb(order_unpacked, default = utils.default_packer)])
-
         except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
             frontend.close(linger = 10)
             backend.close(linger = 10)
@@ -680,7 +680,7 @@ def communication_proxy(address, capture = None, context = None, shutdown_flag =
                 # find out which strategy to send to
                 if (receiver := message_unpacked.get(c.RECEIVER_ID)) is None:
                     raise Exception('No receiver for message specified')
-                
+                # print('communications', receiver, message_unpacked, '\n')
                 # send the message to the receiver
                 message_router.send_multipart([receiver.encode('utf-8'), msgpack.packb(message_unpacked, default = utils.default_packer)])
 

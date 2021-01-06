@@ -9,6 +9,7 @@ from collections import deque
 import datetime
 import pytz
 import time
+import threading
 
 import zmq
 import msgpack
@@ -54,6 +55,7 @@ class Strategy(event_handler.EventHandler):
         # Keeping track of time: internally, time will be tracked as local time
         # For communication, (float) timestamps on the second resolution @ UTC will be used.
         self.clock = utils.unix2datetime(0.0)
+        self.shutdown_flag = threading.Event()
 
 
         # Connection things
@@ -213,7 +215,7 @@ class Strategy(event_handler.EventHandler):
         self.before_start()
         return
     
-    def run(self):
+    def run(self, shutdown_flag = None):
         '''Main event loop. The session should call this.
         
             At any time, the strategy will have visibility of the next event from each socket:
@@ -228,8 +230,9 @@ class Strategy(event_handler.EventHandler):
         '''   
         # TODO: what if we lag behind in processing? how do we catch up?
         
-        global keep_running
-        keep_running = True
+        if shutdown_flag is None:
+            shutdown_flag = self.shutdown_flag
+            shutdown_flag.clear()
 
         # start the strategy
         self.start()
@@ -237,7 +240,7 @@ class Strategy(event_handler.EventHandler):
         # the event 'queue'
         next_events = {}
 
-        while keep_running:
+        while not shutdown_flag.is_set():
 
             # Attempt to fill the event queue for any slots that are empty
             for name, socket in zip([c.COMMUNICATION_SOCKET, c.DATA_SOCKET, c.ORDER_SOCKET],
@@ -253,9 +256,6 @@ class Strategy(event_handler.EventHandler):
                         else:
                             raise Exception(f'Unanticipated socket type {socket.socket_type}')
                         next_events[name] = msgpack.unpackb(event, ext_hook = utils.ext_hook)
-                        # if name == c.COMMUNICATION_SOCKET:
-                        #     if next_events[name]['EVENT_TYPE'] == 'ORDER':
-                        #         print(next_events[name])
                     except zmq.ZMQError as exc:
                         if exc.errno == zmq.EAGAIN:
                             # Nothing to grab
@@ -280,10 +280,9 @@ class Strategy(event_handler.EventHandler):
         
         self.before_stop()
 
-        global keep_running
-        keep_running = False
+        self.shutdown_flag.set()
 
-        time.sleep(0.1)
+        time.sleep(1)
 
         # close sockets
         for socket in [self.communication_socket, self.data_socket, self.order_socket, self.logging_socket]:
@@ -304,13 +303,13 @@ class Strategy(event_handler.EventHandler):
         for symbol, freq in self.children_update_freq.items():
             data = self.datas[symbol]
             # has it been a while since we had the last mark?
-            if (len(data) == 0) or (self.clock - data[c.EVENT_TS[-1]]):
+            if (len(data) == 0) or (self.clock - data[c.EVENT_TS[-1] > freq]):
                 self.to_child(symbol, c.MARK.lower())
         return self.prenext()
     
     def _handle_event(self, event):
 
-        # Run code that needs to be executed bofore handling any event     
+        # Run code that needs to be executed bofore handling any event
         self._prenext()
 
         # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
@@ -380,7 +379,6 @@ class Strategy(event_handler.EventHandler):
         
     # TODO: handle liquidation request
     def _handle_communication(self, communication):
-
         if communication[c.EVENT_SUBTYPE] == c.REQUEST:
 
             answer = getattr(self, communication[c.MESSAGE])
@@ -395,7 +393,6 @@ class Strategy(event_handler.EventHandler):
             else:
                 wrapped_answer = event.communication_event({c.EVENT_SUBTYPE: c.INFO, c.SYMBOL: self.strategy_id})
                 wrapped_answer.update({c.MESSAGE: {communication[c.MESSAGE]: answer}})
-
                 return self.to_parent(wrapped_answer)
         
         elif communication[c.EVENT_SUBTYPE] == c.INFO:
@@ -404,7 +401,10 @@ class Strategy(event_handler.EventHandler):
             if next(iter(info.keys())) == c.MARK:
                 # messages are signed with strategy_id; need to find the symbol tracked in this strategy
                 symbol = next(key for key, value in self.children.items() if value == communication[c.SYMBOL])
+                print(symbol)
                 self.datas[symbol].update_with_data(info)
+        else:
+            print(communication)
 
 
         return
@@ -578,26 +578,27 @@ class Strategy(event_handler.EventHandler):
             child_id = child
         
         # What to send?
-        default_message = {c.EVENT_TYPE: c.COMMUNICATION, c.EVENT_SUBTYPE: c.REQUEST, c.EVENT_TS: self.clock,
-                            c.SENDER_ID: self.strategy_id, c.RECEIVER_ID: child_id}  # adding sender_id for emulator
+        default_params = {c.EVENT_TYPE: c.COMMUNICATION, c.EVENT_SUBTYPE: c.REQUEST, c.EVENT_TS: self.clock.timestamp()}
+        communication_params = {c.SENDER_ID: self.strategy_id, c.RECEIVER_ID: child_id}
         if isinstance(message, dict):
             # add default message info
-            message = {**default_message, **message}
+            message = {**default_params, **message, **communication_params}
         elif isinstance(message, str):
-            message = {**default_message, c.MESSAGE: message}
+            message = {**default_params, c.MESSAGE: message, **communication_params}
         self.communication_socket.send(msgpack.packb(message, default = utils.default_packer))
 
         return
     
     def to_parent(self, message):
         # default message details
-        default_message = {c.EVENT_TYPE: c.COMMUNICATION, c.EVENT_SUBTYPE: c.INFO, c.EVENT_TS: self.clock,
-                            c.SENDER_ID: self.strategy_id, c.RECEIVER_ID: self.parent}
+        default_params = {c.EVENT_TYPE: c.COMMUNICATION, c.EVENT_SUBTYPE: c.INFO, c.EVENT_TS: self.clock.timestamp()}
+        communication_params = {c.SENDER_ID: self.strategy_id, c.RECEIVER_ID: self.parent}
         if isinstance(message, dict):
             # add default message info
-            message = {**default_message, **message}
+            message = {**default_params, **message, **communication_params}
         elif isinstance(message, str):
-            message = {**default_message, c.MESSAGE: message}
+            message = {**default_params, c.MESSAGE: message, **communication_params}
+        print(message)
         self.communication_socket.send(msgpack.packb(message, default = utils.default_packer))
 
         return
