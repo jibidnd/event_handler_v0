@@ -7,7 +7,6 @@ import queue
 import operator
 import time
 import zmq
-import msgpack
 
 from . import utils
 
@@ -396,7 +395,7 @@ class Session:
                 while True:
                     try:
                         strategy_id_encoded, order_packed = self.broker_strategy_socket.recv_multipart(zmq.NOBLOCK)
-                        order_unpacked = msgpack.unpackb(order_packed, ext_hook = utils.ext_hook)
+                        order_unpacked = utils.unpackb(order_packed)
                         
                         # find a broker
                         if (broker := order_unpacked.get(c.BROKER)) is None:
@@ -404,7 +403,7 @@ class Session:
                         # have broker handle the order
                         if (response := broker.take_order(order_unpacked)) is not None:
                             # prepare the response
-                            response_packed = msgpack.packb(response, default = utils.default_packer)
+                            response_packed = utils.packb(response)
                             original_sender = response[c.STRATEGY_CHAIN].pop()
                             original_sender_encoded = original_sender.encode('utf-8')
                             # send the response
@@ -459,7 +458,7 @@ class Session:
                             # if STRATEGIES_FULL, send order response via the socket
                             if socket_mode == c.STRATEGIES_FULL:
                                 # prepare the response
-                                response_packed = msgpack.packb(fill, default = utils.default_packer)
+                                response_packed = utils.packb(fill)
                                 original_sender = fill[c.STRATEGY_CHAIN].pop()
                                 original_sender_encoded = original_sender.encode('utf-8')
                                 msg = self.broker_strategy_socket.send_multipart([original_sender_encoded, response_packed], copy = False, track = True)
@@ -474,7 +473,7 @@ class Session:
             if socket_mode == c.STRATEGIES_FULL:
                 # prepare the data
                 topic_encoded = next_data[c.TOPIC].encode('utf-8')
-                data_packed = msgpack.packb(next_data, default = utils.default_packer)
+                data_packed = utils.packb(next_data)
                 msg = self.data_subscriber_socket.send_multipart([topic_encoded, data_packed], copy = False, track = True)
                 msg.wait()
             # otherwise have strategies directly handle the data event
@@ -602,7 +601,7 @@ def broker_proxy(address_frontend, address_backend, capture = None, context = No
                 # received order from strategy: (strategy ident, order)
                 # Note that the strategy should already have placed its strategy_id in the STRATEGY_CHAIN in the order
                 strategy_id_encoded, order_packed = frontend.recv_multipart()
-                order_unpacked = msgpack.unpackb(order_packed, ext_hook = utils.ext_hook)
+                order_unpacked = utils.unpackb(order_packed)
                 if (broker := order_unpacked.get(c.BROKER)) is not None:
                     broker = broker
                 else:
@@ -617,9 +616,9 @@ def broker_proxy(address_frontend, address_backend, capture = None, context = No
             elif socks.get(backend) == zmq.POLLIN:
                 # received order from broker: (broker ident, (strategy ident, order))
                 broker_encoded, order_packed = backend.recv_multipart()
-                order_unpacked = msgpack.unpackb(order_packed, ext_hook = utils.ext_hook)
+                order_unpacked = unpackb(order_packed)
                 send_to = order_unpacked[c.STRATEGY_CHAIN].pop()
-                frontend.send_multipart([send_to.encode('utf-8'), msgpack.packb(order_unpacked, default = utils.default_packer)])
+                frontend.send_multipart([send_to.encode('utf-8'), utils.packb(order_unpacked)])
         except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
             frontend.close(linger = 10)
             backend.close(linger = 10)
@@ -675,14 +674,14 @@ def communication_proxy(address, capture = None, context = None, shutdown_flag =
             if socks.get(message_router) == zmq.POLLIN:
                 # received message from strategy: (strategy ident, order)
                 strategy_id_encoded, message_packed = message_router.recv_multipart()
-                message_unpacked = msgpack.unpackb(message_packed, ext_hook = utils.ext_hook)
+                message_unpacked = utils.unpackb(message_packed)
                 # message_unpacked[c.SENDER_ID] = strategy_id_encoded.decode('utf-8')
                 # find out which strategy to send to
                 if (receiver := message_unpacked.get(c.RECEIVER_ID)) is None:
                     raise Exception('No receiver for message specified')
                 # print('communications', receiver, message_unpacked, '\n')
                 # send the message to the receiver
-                message_router.send_multipart([receiver.encode('utf-8'), msgpack.packb(message_unpacked, default = utils.default_packer)])
+                message_router.send_multipart([receiver.encode('utf-8'), utils.packb(message_unpacked)])
 
         except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
             message_router.close(linger = 10)
@@ -710,11 +709,11 @@ class SocketEmulator:
             self.deq = deque()
 
     def send(self, item):
-        self.deq.append(msgpack.unpackb(item, ext_hook = utils.ext_hook))
+        self.deq.append(utils.unpackb(item))
     
     def send_multipart(self, items):
         item = items[1]
-        self.deq.append(msgpack.unpackb(item, ext_hook = utils.ext_hook))
+        self.deq.append(utils.unpackb(item))
 
     def recv(self):
         raise zmq.ZMQError(errno = zmq.EAGAIN, msg = 'Socket emulator: Nothing to receive.')

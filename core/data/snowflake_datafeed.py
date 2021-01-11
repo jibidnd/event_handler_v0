@@ -2,13 +2,12 @@ import time
 import configparser
 
 import zmq
-import msgpack
-
 import snowflake.connector
 from snowflake.connector.converter_null import SnowflakeNoConverterToPython
 
 from ..data import BaseDataFeed
 from .. import constants as c
+from .. import utils
 
 class SnowflakeDataFeed(BaseDataFeed):
 
@@ -94,8 +93,7 @@ class SnowflakeDataFeed(BaseDataFeed):
             res = self.cur.fetchone()
 
             if res is not None:
-                # msgpack
-                res_packed = msgpack.packb(res, use_bin_type = True, default = utils.default_packer)
+                res_packed = utils.packb(res)
                 tempts = res[c.EVENT_TS]
                 # send the event with a topic
                 try:

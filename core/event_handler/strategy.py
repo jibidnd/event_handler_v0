@@ -12,7 +12,6 @@ import time
 import threading
 
 import zmq
-import msgpack
 
 from .. import constants as c
 from .. import event_handler
@@ -255,7 +254,7 @@ class Strategy(event_handler.EventHandler):
                             event = socket.recv(zmq.NOBLOCK)
                         else:
                             raise Exception(f'Unanticipated socket type {socket.socket_type}')
-                        next_events[name] = msgpack.unpackb(event, ext_hook = utils.ext_hook)
+                        next_events[name] = utils.unpackb(event)
                     except zmq.ZMQError as exc:
                         if exc.errno == zmq.EAGAIN:
                             # Nothing to grab
@@ -585,7 +584,7 @@ class Strategy(event_handler.EventHandler):
             message = {**default_params, **message, **communication_params}
         elif isinstance(message, str):
             message = {**default_params, c.MESSAGE: message, **communication_params}
-        self.communication_socket.send(msgpack.packb(message, default = utils.default_packer))
+        self.communication_socket.send(utils.packb(message))
 
         return
     
@@ -599,7 +598,7 @@ class Strategy(event_handler.EventHandler):
         elif isinstance(message, str):
             message = {**default_params, c.MESSAGE: message, **communication_params}
         print(message)
-        self.communication_socket.send(msgpack.packb(message, default = utils.default_packer))
+        self.communication_socket.send(utils.packb(message))
 
         return
 
@@ -679,7 +678,7 @@ class Strategy(event_handler.EventHandler):
             order[c.STRATEGY_CHAIN].append(self.strategy_id)
         # place the order
         if self.parent is None:
-            self.order_socket.send(msgpack.packb(order, use_bin_type = True, default = utils.default_packer))
+            self.order_socket.send(utils.packb(order))
         else:
             self.to_parent(order)
         
