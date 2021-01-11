@@ -1,3 +1,4 @@
+import warnings
 import datetime
 import math
 import pytz
@@ -193,24 +194,53 @@ def duration_to_sec(duration):
     elif duration == 'Y':
         return 60.0 * 60.0 * 24.0 * 7 * 365.25
 
+
+# msgpack logic:
+#     packing:
+#         if object in handled types:
+#             pack using msgpack logic
+#         else:
+#             use passed default packer
+#     unpacking:
+#         if object in handled types:
+#             unpacking using msgpack logic
+#         elif object is ext_type:
+#             use passed ext_hook
+
 def packb(obj):
-    msgpack.packb(obj, default = default_packer)
+    # gives special handling to datetime and numeric objects
+    # msgpack strips (and discards) the tzinfo
+    if isinstance(obj, datetime.datetime):
+        if (tzinfo := obj.tzinfo) is None:
+            obj = obj.astimezone(tz = None) # assumes system local timezone
+            warnings.warn('Naive datetime object passed. Assuming system local timezone.')
+        processed = msgpack.ExtType(5, msgpack.packb((obj.isoformat(), obj.tzinfo), default = str))
+    else:
+        try:
+            obj = decimal.Decimal(obj)
+            processed = msgpack.ExtType(10, str(obj).encode('utf-8'))
+        except:
+            processed = obj
+    
+    return msgpack.packb(processed, default = str)
+
+def ext_hook(ext_type_code, data):
+    # Handle it if it is one of the pre-defined ext_types
+    if ext_type_code == 5:
+        isoformat, tzinfo = msgpack.unpackb(data)
+        try:
+            # add tzinfo if it is recognized by pytz
+            # Note that some timezone names can be ambiguous (see https://pypi.org/project/pytz/)
+            #   In such cases (e.g. PST), the tzname will be dropped.
+            tzinfo = pytz.timezone(tzinfo)
+            return tzinfo.localize(datetime.datetime.fromisoformat(isoformat).replace(tzinfo = None))
+        except:
+            return datetime.datetime.fromisoformat(isoformat)
+    elif ext_type_code == 10:
+        return decimal.Decimal(data.decode('utf-8'))
+    # otherwise let msgpack do the default handling of ext_types
+    else:
+        return msgpack.ExtType(ext_type_code, data)  
 
 def unpackb(obj):
-    msgpack.unpackb(obj, ext_hook = ext_hook)
-
-def default_packer(obj):
-    # if isinstance(obj, datetime.datetime):
-    #     obj = obj.timestamp()
-    try:
-        decimal.Decimal(obj)
-        return msgpack.ExtType(10, str(obj).encode('utf-8'))
-    except (decimal.InvalidOperation, TypeError):
-        return str(obj)
-    except:
-        raise
-
-def ext_hook(ext_type_code, obj):
-    if ext_type_code == 10:
-        return decimal.Decimal(obj.decode('utf-8'))
-    return msgpack.ExtType(ext_type_code, obj)
+    return msgpack.unpackb(obj, ext_hook = ext_hook)
