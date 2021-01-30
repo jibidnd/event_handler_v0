@@ -4,13 +4,14 @@
 import abc
 import collections
 import uuid
-from decimal import Decimal, InvalidOperation
+import decimal
+from collections import deque
 import datetime
 import pytz
 import time
+import threading
 
 import zmq
-import msgpack
 
 from .. import constants as c
 from .. import event_handler
@@ -19,55 +20,51 @@ from .position import Position, CashPosition
 from .. import utils
 
 class Strategy(event_handler.EventHandler):
-    def __init__(self, name = None, zmq_context = None, parent_address = None, children_addresses = None,
-                    data_address = None, order_address = None, logging_addresses = None, strategy_address = None,
+    def __init__(self, name = None, zmq_context = None, communication_address = None,
+                    data_address = None, order_address = None, logging_addresses = None,
                     data_subscriptions = None, params = None, rms = None, local_tz = 'America/New_York'):
         # initialization params
         self.name = name
         self.zmq_context = zmq_context or zmq.Context.instance()
-        self.parent_address = parent_address
-        self.children_addresses = children_addresses
+        self.communication_address = communication_address
         self.data_address = data_address
         self.order_address = order_address
         self.logging_addresses = logging_addresses
-        self.strategy_address = strategy_address
+        self.local_tz = pytz.timezone(local_tz)
         self.params = params or dict()
         self.rms = rms or RMS()
 
         # data and record keeping
-        self.parent_id = None
+        self.parent = None
         self.strategy_id = str(uuid.uuid1()) # Note that this shows the network address.
-        self.children_ids = {}        # name: strategy_id
+        self.children = {}                  # name: strategy_id
         # If given, sends request to children in self.prenext
         # Otherwise children will only update with marks when prompted by self.to_child
-        self.children_update_freq = {}  # strategy_id: datetime.timedelta
+        self.children_update_freq = {}      # strategy_id: datetime.timedelta
         self.datas = {}
         self.data_subscriptions = (data_subscriptions or set()) | {self.strategy_id}   # list of topics subscribed to
         self.cash = CashPosition()
-        self.open_trades = {}           # trade_id: [position_ids]
-        self.closed_trades = {}         # trade_id: [position_ids]
-        self.open_positions = {}        # position_id: position object
-        self.closed_positions = {}      # position_id: position object  # TODO: closed positions need to be moved to closed_positions from open_positions
+        self.open_trades = {}               # trade_id: [position_ids]
+        self.closed_trades = {}             # trade_id: [position_ids]
+        self.open_positions = {}            # position_id: position object
+        self.closed_positions = {}          # position_id: position object  # TODO: closed positions need to be moved to closed_positions from open_positions
         # TODO
-        self.pending_orders = {}        # orders not yet filled: order_id: order_event
+        self.pending_orders = {}            # orders not yet filled: order_id: order_event
 
         # Keeping track of time: internally, time will be tracked as local time
         # For communication, (float) timestamps on the second resolution @ UTC will be used.
         self.clock = utils.unix2datetime(0.0)
+        self.shutdown_flag = threading.Event()
 
 
         # Connection things
-        self.parent = None
-        self.children = None
+        self.communication_socket = None
         self.data_socket = None
         self.order_socket = None
         self.logging_socket = None
 
-        if self.parent_address is not None:
-            self.connect_parent(parent_address)
-        if self.children_addresses is not None:
-            for children_address in children_addresses:
-                self.connect_children(children_address)
+        if self.communication_address is not None:
+            self.connect_communication_socket(communication_address)
         if self.data_address is not None:
             self.connect_data_socket(data_address)
         if self.order_address is not None:
@@ -79,26 +76,15 @@ class Strategy(event_handler.EventHandler):
     # ----------------------------------------------------------------------------------------------------
     # Communication stuff
     # ----------------------------------------------------------------------------------------------------
-    def connect_parent(self, parent_address):
+    def connect_communication_socket(self, communication_address):
         # if new address, overwrite the current record
-        self.parent_address = parent_address
+        self.communication_address = communication_address
         # Create a parent socket if none exists yet
-        if not self.parent:
+        if not self.communication_socket:
             socket = self.zmq_context.socket(zmq.DEALER)
             socket.setsockopt(zmq.IDENTITY, self.strategy_id.encode())
-            self.parent = socket
-        self.parent.connect(self.parent_address)
-
-    def connect_children(self, children_address):
-        # if new address, add it to the list
-        if children_address not in self.children_addresses:
-            self.children_addresses.append(children_address)
-        # Create a children socket if none exists yet
-        if not self.children:
-            socket = self.zmq_context.socket(zmq.ROUTER)
-            self.children = socket
-        # Bind to the new address (on top of the current ones, if any)
-        self.children.bind(children_address)
+            self.communication_socket = socket
+        self.communication_socket.connect(communication_address)
 
     def connect_data_socket(self, data_address):
         # if new address, overwrite the current record
@@ -109,7 +95,7 @@ class Strategy(event_handler.EventHandler):
             self.data_socket = socket
             # subscribe to data with prefix the strategy's id
         for topic in self.data_subscriptions:
-            self.subscribe_to_data(topic)
+            self.subscribe_to_data(topic, track = (topic != self.strategy_id))
         self.data_socket.connect(data_address)
         
     def connect_order_socket(self, order_address):
@@ -170,36 +156,45 @@ class Strategy(event_handler.EventHandler):
             self.data_socket.setsockopt(zmq.SUBSCRIBE, topic.encode())
         return
 
-    def add_child(self, symbol, child_strategy = None, child_strategy_id = None, child_update_freq = datetime.timedelta(seconds = 1), child_address = None):
+    def add_parent(self, parent_strategy = None, parent_strategy_id = None):
         """Add a child.
-
-            If child_address is provided, connect to that address.
-            Otherwise assume that child is reacheable via one of children_addresses.
-
+        
         Args:
-            symbol (str): name of the child. Must be unique in the strategy across the set of all symbols.
-            child_strategy (Strategy or supports .get): if provided, will be used to get child_strategy_id and child_address.
+            parent_strategy (Strategy or supports .get): if provided, will be used to get parent_strategy_id.
+            parent_strategy_id (str): The strategy_id to identify the parent by. If None, must be provided by child_strategy.
+        """
+        # if child_strategy is provided, attempt to get these information
+        if parent_strategy is not None:
+            parent_strategy_id = parent_strategy.get(c.STRATEGY_ID.lower())
+        
+        assert (parent_strategy_id) is not None, 'Need strategy_id of parent being added.'
+        
+        self.parent = parent_strategy_id
+
+        return
+
+    def add_child(self, symbol, child_strategy = None, child_strategy_id = None, child_update_freq = datetime.timedelta(seconds = 1)):
+        """Add a child.
+        
+        Args:
+            symbol (str): name of the child. Must be unique in the strategy across the set of all symbols (i.e. including tickers).
+            child_strategy (Strategy or supports .get): if provided, will be used to get child_strategy_id.
             child_strategy_id (str): The strategy_id to identify the (existing) child by. If None, must be provided by child_strategy.
             child_update_freq (datetime.timedelta): How often the child's mark should be updated.
                                                     To update constantly (each _prenext), set to <0.
-            child_address (str, optional): Address of the child (must be provided if not already in self.children_addresses). Defaults to None.
         """
         # if child_strategy is provided, attempt to get these information
         if child_strategy is not None:
-            child_strategy_id = child_strategy.get(c.STRATEGY_ID)
-            child_address = child_strategy.get(c.STRATEGY_ADDRESS)
+            child_strategy_id = child_strategy.get(c.STRATEGY_ID.lower())
         
-        assert (child_strategy_id) is not None, 'Need child_strategy_id and child_address info.'
+        assert (child_strategy_id) is not None, 'Need strategy_id of child being added.'
         
-        # Connect to the child
-        self.children_ids[symbol] = child_strategy_id
-        self.children_update_freq[child_strategy_id] = child_update_freq
-
-        if child_address is not None:
-            self.connect_children(child_address)
+        # Add the child
+        self.children[symbol] = child_strategy_id
+        self.children_update_freq[symbol] = child_update_freq
         
         # Track child data
-        self.datas[symbol] = lines(symbol, data_type = c.SIGNAL)
+        self.datas[symbol] = lines(symbol, data_type = c.TICK)
 
         # Add a position for the child strategy
         self.create_position(symbol, asset_class = c.STRATEGY)
@@ -219,11 +214,11 @@ class Strategy(event_handler.EventHandler):
         self.before_start()
         return
     
-    def run(self):
+    def run(self, shutdown_flag = None):
         '''Main event loop. The session should call this.
         
             At any time, the strategy will have visibility of the next event from each socket:
-                Data, order, parent, children; as stored in next_events.
+                Data, order, communication; as stored in next_events.
                 If any of these slots are empty, the strategy will make 1 attempt to receive data
                 from the corresponding sockets.
             
@@ -234,23 +229,21 @@ class Strategy(event_handler.EventHandler):
         '''   
         # TODO: what if we lag behind in processing? how do we catch up?
         
-        global keep_running
-        keep_running = True
+        if shutdown_flag is None:
+            shutdown_flag = self.shutdown_flag
+            shutdown_flag.clear()
 
-        # # start the children strategies, if any
-        # if self.children is not None:
-        #     self.to_child('', 'start')
         # start the strategy
         self.start()
 
         # the event 'queue'
         next_events = {}
 
-        while keep_running:
+        while not shutdown_flag.is_set():
 
             # Attempt to fill the event queue for any slots that are empty
-            for name, socket in zip([c.DATA_SOCKET, c.ORDER_SOCKET, c.PARENT_SOCKET, c.CHILDREN_SOCKET],
-                                    [self.data_socket, self.order_socket, self.parent, self.children]):
+            for name, socket in zip([c.COMMUNICATION_SOCKET, c.DATA_SOCKET, c.ORDER_SOCKET],
+                                    [self.communication_socket, self.data_socket, self.order_socket]):
                 if socket is None: continue
                 if next_events.get(name) is None:
                     try:
@@ -259,18 +252,22 @@ class Strategy(event_handler.EventHandler):
                             topic, event = socket.recv_multipart(zmq.NOBLOCK)
                         elif socket.socket_type in [zmq.DEALER]:
                             event = socket.recv(zmq.NOBLOCK)
-                        next_events[name] = msgpack.unpackb(event, ext_hook = utils.ext_hook)
+                        else:
+                            raise Exception(f'Unanticipated socket type {socket.socket_type}')
+                        next_events[name] = self._preprocess_event(utils.unpackb(event))
                     except zmq.ZMQError as exc:
                         if exc.errno == zmq.EAGAIN:
                             # Nothing to grab
                             pass
                         else:
                             raise
+
                 
             # Now we can sort the upcoming events and handle the next event
             if len(next_events) > 0:
                 # Handle the socket with the next soonest event (by EVENT_TS)
                 # take the first item (socket name) of the first item ((socket name, event)) of the sorted queue
+                print(next_events)
                 next_socket = sorted(next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
                 next_event = next_events.pop(next_socket)        # remove the event from next_events
                 self._handle_event(next_event)
@@ -283,13 +280,12 @@ class Strategy(event_handler.EventHandler):
         
         self.before_stop()
 
-        global keep_running
-        keep_running = False
+        self.shutdown_flag.set()
 
-        time.sleep(0.1)
+        time.sleep(1)
 
         # close sockets
-        for socket in [self.parent, self.children, self.data_socket, self.order_socket, self.logging_socket]:
+        for socket in [self.communication_socket, self.data_socket, self.order_socket, self.logging_socket]:
             if (socket is not None) and (~socket.closed):
                 socket.close(linger = 10)
 
@@ -307,18 +303,31 @@ class Strategy(event_handler.EventHandler):
         for symbol, freq in self.children_update_freq.items():
             data = self.datas[symbol]
             # has it been a while since we had the last mark?
-            if (len(data) == 0) or (self.clock - data[c.EVENT_TS[-1]]):
-                self.to_child(symbol, c.MARK)
+            if (len(data) == 0) or (self.clock - data[c.EVENT_TS[-1] > freq]):
+                self.to_child(symbol, c.MARK.lower())
         return self.prenext()
-    
+
+    def _preprocess_event(self, event):
+        # preprocess received events prior to handling them
+
+        # localize the event ts
+        event_ts = event[c.EVENT_TS]
+        if isinstance(event_ts, (int, float, decimal.Decimal)):
+            event_ts = utils.unix2datetime(event_ts, to_tz = self.local_tz)
+        elif isinstance(event_ts, datetime.datetime):
+            event_ts = event_ts.astimezone(self.local_tz)
+        event[c.EVENT_TS] = event_ts
+        
+        return self.preprocess_event(event)
+
     def _handle_event(self, event):
 
-        # Run code that needs to be executed bofore handling any event            
+        # Run code that needs to be executed bofore handling any event
         self._prenext()
 
         # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
-        if (tempts := event[c.EVENT_TS]) > self.clock.timestamp():
-            self.clock = utils.unix2datetime(tempts)
+        if (event_ts := event[c.EVENT_TS]) > self.clock:
+            self.clock = event_ts
         return super()._handle_event(event)
 
 
@@ -326,7 +335,7 @@ class Strategy(event_handler.EventHandler):
     def _handle_data(self, data):
         '''Update lines in self.datas with data event'''
         try:
-            symbol = data.get(c.SYMBOL)
+            symbol = data[c.SYMBOL]
         except KeyError:
             # TODO:
             raise
@@ -357,47 +366,60 @@ class Strategy(event_handler.EventHandler):
                 the order is sent to the corresponding position to update the position.
         '''
         event_subtype = order.get(c.EVENT_SUBTYPE)
-        from_children = (order.get(c.STRATEGY_ID) in self.children_ids.values())
+        from_children = (order.get(c.STRATEGY_ID) in self.children.values())
         from_self = (str(order.get(c.STRATEGY_ID)) == str(self.strategy_id))
 
-        if from_children:
-            if event_subtype == c.REQUESTED:
-            # receiving a REQUESTED order from one of the children
-                # call RMS
-                approved = self.rms.request_order_approval(order)
-                if approved:
-                    self.place_order(order, trade = None)
-                else:
-                    self.deny_order(order)
+        if event_subtype == c.REQUESTED:
+        # receiving a REQUESTED order from one of the children
+            # call RMS
+            approved = self.rms.request_order_approval(order)
+            if approved:
+                self.place_order(order)
             else:
-            # receiving an order response for one of the children
+                self.deny_order(order)
+        else:
+            if len(order[c.STRATEGY_CHAIN]) == 0:
+                # update the positions that the order came from
+                self.open_positions[order[c.POSITION_ID]]._handle_event(order)
+                self.cash._handle_event(order)
+            else:
+                original_sender = order[c.STRATEGY_CHAIN].pop()
+                # receiving an order response for one of the children
                 # let them know
-                self.to_child(order.get(c.STRATEGY_ID), order)
-        elif from_self:
-        # otherwise it is an order resolution for self. Update positions
-            # update the positions that the order came from
-            self.open_positions[order.get(c.POSITION_ID)]._handle_event(order)
-            self.cash._handle_event(order)
-        
+                self.to_child(original_sender, order)
+
         return self.handle_order(order)
         
-    # TODO: handle liquidation rquest
-    def _handle_command(self, command):
-        answer = getattr(self, command[c.REQUEST])
-        if hasattr(answer, '__call__'):
-            if command.get(c.KWARGS) is not None:
-                answer = answer(**command[c.KWARGS])
-            else:
-                answer = answer()
-        # return the answer if there is one
-        if answer is None:
-            pass
-        else:
-            wrapped_answer = event.data_event({c.EVENT_SUBTYPE: c.SIGNAL, c.SYMBOL: self.strategy_id})
-            wrapped_answer.update({c.REQUEST: answer})
+    # TODO: handle liquidation request
+    def _handle_communication(self, communication):
+        if communication[c.EVENT_SUBTYPE] == c.REQUEST:
 
-            return self.to_parent(wrapped_answer)
+            answer = getattr(self, communication[c.MESSAGE])
+            if hasattr(answer, '__call__'):
+                if communication.get(c.KWARGS) is not None:
+                    answer = answer(**communication[c.KWARGS])
+                else:
+                    answer = answer()
+            # return the answer if there is one
+            if answer is None:
+                pass
+            else:
+                wrapped_answer = event.communication_event({c.EVENT_SUBTYPE: c.INFO, c.SYMBOL: self.strategy_id})
+                wrapped_answer.update({c.MESSAGE: {communication[c.MESSAGE]: answer}})
+                return self.to_parent(wrapped_answer)
         
+        elif communication[c.EVENT_SUBTYPE] == c.INFO:
+            # handling info
+            info = communication[c.MESSAGE]
+            if next(iter(info.keys())) == c.MARK:
+                # messages are signed with strategy_id; need to find the symbol tracked in this strategy
+                symbol = next(key for key, value in self.children.items() if value == communication[c.SYMBOL])
+                print(symbol)
+                self.datas[symbol].update_with_data(info)
+        else:
+            print(communication)
+
+
         return
 
     def prenext(self):
@@ -432,7 +454,7 @@ class Strategy(event_handler.EventHandler):
 
         # Try getting it from datas
         # First try exact match
-        if key in self.dats.keys():
+        if identifier in self.datas.keys():
             return self.datas[identifier]
         # Otherwise see if there are lines with names specified with resolution
         elif (keys := [key for key in self.datas.keys() if identifier in key]) !=  []:
@@ -449,7 +471,12 @@ class Strategy(event_handler.EventHandler):
             try:
                 answer = getattr(self, identifier)
             except AttributeError:
-                raise
+                try:
+                    # Try not to use this as this is 20x slower
+                    key = [x for x in self.__dir__() if x.upper() == identifier.upper()][0]
+                    answer = getattr(self, key)
+                except IndexError:
+                    raise Exception(f'No attribute by the name of {identifier}')
             return answer
 
 
@@ -460,7 +487,7 @@ class Strategy(event_handler.EventHandler):
             asset (str): the name / identifier of the asset
 
         Returns:
-            decimal: The last known value of the asset
+            decimal.Decimal: The last known value of the asset
         """
         # Get most recent datapoint
         if (data := self.datas.get(identifier)):
@@ -511,12 +538,22 @@ class Strategy(event_handler.EventHandler):
         return v
 
     def total_pnl(self, identifier = None):
+        # TODO: identifier can be a trade or a symbol
         '''Realized + unrealized PNL'''
         if identifier is None:
             credit = sum([position.credit for position_id, position in self.open_positions.items()]) \
                         + sum([position.credit for position_id, position in self.closed_positions.items()])
             debit = sum([position.debit for position_id, position in self.open_positions.itmes()]) \
                         + sum([position.debit for position_id, position in self.closed_positions.itmes()]) 
+        else:
+            if identifier in self.open_positions.keys():
+                credit = self.open_positions[identifier].credit
+                debit = self.open_positions[identifier].debit
+            elif identifier in self.closed_positions.keys():
+                credit = self.closed_positions[identifier].credit
+                debit = self.closed_positions[identifier].debit
+            else:
+                raise Exception('position not found')
         return credit + self.value_open - debit
 
     @property
@@ -524,48 +561,61 @@ class Strategy(event_handler.EventHandler):
         """
         This is the sum of cash and values of current open positions.
         """
+        # pending orders do not affect cash balance
         nav = sum([position.value_open for position_id, position in self.open_positions.items()])
-        nav += self.cash.value_open
+        nav += self.cash.balance
         return nav
     
     @property
     def mark(self):
         """NAV / total cash deposited"""
-        return self.net_asset_value / self.cash.net_flow
+        if self.cash.net_flow != 0:
+            return self.net_asset_value / self.cash.net_flow
+        else:
+            return self.net_asset_value
 
     def to_child(self, child, message):
         '''
             To send message to all children, simply specify child = ''
         '''
-        if self.children is None:
-            raise Exception('No connected children to send message to.')
-        
+
         # Who to send to?
         # if child is specified by name (symbol), get the strategy_id, as it is what the child is subscribed to
-        if child in self.children_ids.keys():
-            child = self.children_ids[child].encode()
+        if child in self.children.keys():
+            child_id = self.children[child]
+        # else assume it is the strategy_id of the child
         elif isinstance(child, str):
-            child = child.encode()
+            child_id= child
         else:
             assert isinstance(child, bytes), 'Child must be specified by str of bytes.'
+            child_id = child
         
         # What to send?
-        if isinstance(message, str):
-            # If message is a string, assume it is a command
-            message = event.command_event({c.REQUEST: message, c.EVENT_TS: self.clock})
-        elif isinstance(message, dict):
-            # If it is a dict, assume it is a command unless otherwised specified (by providing event_type in message)
-            message = event.command_event({c.EVENT_TS: self.clock, **message})
-        self.children.send_multipart([child, message])
+        default_params = {c.EVENT_TYPE: c.COMMUNICATION, c.EVENT_SUBTYPE: c.REQUEST, c.EVENT_TS: self.clock}
+        communication_params = {c.SENDER_ID: self.strategy_id, c.RECEIVER_ID: child_id}
+        if isinstance(message, dict):
+            # add default message info
+            message = {**default_params, **message, **communication_params}
+        elif isinstance(message, str):
+            message = {**default_params, c.MESSAGE: message, **communication_params}
+        self.communication_socket.send(utils.packb(message))
 
         return
     
     def to_parent(self, message):
-        # Sending commands to parents is not supported, so the message must be a dict indicating how it should be handled.
-        assert isinstance(message, dict), 'Messages to parents must be dicts.'
-        # Assume it is a data unless otherwised specified (by providing event_type in message)
-        message = event.data_event({c.EVENT_SUBTYPE: c.INFO, c.EVNET_TS: self.clock, **message})
-        self.to_parent.send(message)
+        # default message details
+        default_params = {c.EVENT_TYPE: c.COMMUNICATION, c.EVENT_SUBTYPE: c.INFO, c.EVENT_TS: self.clock}
+        communication_params = {c.SENDER_ID: self.strategy_id, c.RECEIVER_ID: self.parent}
+        if isinstance(message, dict):
+            # add default message info
+            message = {**default_params, **message, **communication_params}
+        elif isinstance(message, str):
+            message = {**default_params, c.MESSAGE: message, **communication_params}
+        print(message)
+        self.communication_socket.send(utils.packb(message))
+
+        return
+
 
     # ----------------------------------------------------------------------------------------------------
     # Action stuff
@@ -601,19 +651,19 @@ class Strategy(event_handler.EventHandler):
             c.SYMBOL: position.symbol,
             c.ORDER_TYPE: c.MARKET,
             c.QUANTITY: quantity,
-            c.EVENT_TS: self.clock.timestamp(),
+            c.EVENT_TS: self.clock,
             c.PRICE: self.get_mark(symbol) or 0.0,
             c.QUANTITY_OPEN: quantity
             }
         
         order = {**default_order_details, **order_details}
-        for key, value in order.items():
-            try:
-                order.update({key: Decimal(value)})
-            except InvalidOperation:
-                pass
-            except:
-                raise
+        # for key, value in order.items():
+        #     try:
+        #         order.update({key: decimal.Decimal(value)})
+        #     except InvalidOperation:
+        #         pass
+        #     except:
+        #         raise
         
         return event.order_event(order)
 
@@ -626,7 +676,6 @@ class Strategy(event_handler.EventHandler):
 
         The order must contain position_id to update the corresponding positions.
         '''
-
         pass_through = (str(order[c.STRATEGY_ID]) != str(self.strategy_id))
         assert (position_id := order.get(c.POSITION_ID)) is not None, 'Order must belong to a position.'
 
@@ -636,12 +685,14 @@ class Strategy(event_handler.EventHandler):
             # update cash
             self.cash._handle_event(order)
         
+        # add self to chain
+        if (strategy_chain := order.get(c.STRATEGY_CHAIN)) is None:
+            order.update({c.STRATEGY_CHAIN: [self.strategy_id]})
+        else:
+            order[c.STRATEGY_CHAIN].append(self.strategy_id)
         # place the order
         if self.parent is None:
-            if self.order_socket is not None:
-                self.order_socket.send(msgpack.packb(order, use_bin_type = True, default = utils.default_packer))
-            # return order for no socket modes
-            return order
+            self.order_socket.send(utils.packb(order))
         else:
             self.to_parent(order)
         
@@ -653,7 +704,7 @@ class Strategy(event_handler.EventHandler):
         Send the denial to the child.
         '''
         order = order.update(event_subtype = c.DENIED)
-        self.children.send_multipart([order[c.STRATEGY_ID], order])
+        self.to_child(order[c.STRATEGY_CHAIN].pop(), order)
 
     def liquidate(self, id_or_symbol = None, order_details = {c.ORDER_TYPE: c.MARKET}):
         """Liquidate a trade, position, or positions on the specified symbol.
@@ -674,7 +725,7 @@ class Strategy(event_handler.EventHandler):
         elif (id_or_symbol in self.closed_positions):
             raise Exception('Posititon already closed.')
         # If this is a child strategy, send them the note
-        elif id_or_symbol in self.children_ids.keys():
+        elif id_or_symbol in self.children.keys():
             self.to_child(id_or_symbol, c.LIQUIDATE)
         elif (id_or_symbol in [position.symbol for position in self.open_positions]):
             for position in self.open_positions.values():

@@ -40,10 +40,11 @@ class EventHandler(abc.ABC):
             return self._handle_data(event)
         elif event_type == c.ORDER:
             return self._handle_order(event)
-        elif event_type == c.COMMAND:
-            return self._handle_command(event)
+        elif event_type == c.COMMUNICATION:
+            return self._handle_communication(event)
         else:
             raise Exception('Event type {} not supported.'.format(event_type))
+
 
     
     @abc.abstractmethod
@@ -57,9 +58,15 @@ class EventHandler(abc.ABC):
         return
 
     # @abc.abstractmethod
-    def _handle_command(self, command_event):
+    def _handle_communication(self, communication):
         return
     
+    def _preprocess_event(self, event):
+        return event
+    
+    def preprocess_event(self, event):
+        return event
+
     def handle_event(self, event):
         return
 
@@ -87,12 +94,12 @@ class EventHandlerTemplate(EventHandler):
         self.handle_order(order)
         return
 
-    def _handle_command(self, command):
+    def _handle_communication(self, communication):
         # class methods
         # do something that all instances should do
         # instance methods
-        # the instance will override handle_command
-        self.handle_command(command)
+        # the instance will override handle_communication
+        self.handle_communication(communication)
         return
 
     # @abc.abstractmethod
@@ -104,34 +111,8 @@ class EventHandlerTemplate(EventHandler):
         return
 
     # @abc.abstractmethod
-    def handle_command(self, command):
+    def handle_communication(self, communication):
         return
-
-# class Trade:
-#     '''A trade consists of a group of transactions that should be viewed together'''
-#     def __init__(self):
-#         # TODO: get name of strategy from which it's called
-#         # Define the following
-#         # self.strategy_id
-#         # self.trade_id
-#         # self.trade_name
-#         # self.status
-#         # self.risk
-#         # self.realized
-#         # self.unrealized
-#         # self.commission
-#         # self.positions
-#         pass
-    
-#     def update(self, event):
-#         # Handle events: Order, Fill, Flow, Command
-#         pass
-    
-#     def close(self, params):
-#         # liquidate the position
-#         pass
-
-
 
 # Define events
 # All events will be in the form of dictionary, since they will all just be data packets, and dicts are very fast
@@ -202,19 +183,19 @@ class event:
         return data
     
     @staticmethod
-    def command_event(dict_command_details = {}):
+    def communication_event(dict_communication_details = {}):
         '''
         Create a data event with default arguments.
         See constants.py for event_subtypes for data.
         '''
-        command = {
-            c.EVENT_TYPE: c.COMMAND,
+        communication = {
+            c.EVENT_TYPE: c.COMMUNICATION,
             c.EVENT_SUBTYPE: c.REQUEST,
             c.EVENT_TS: datetime.datetime.now()
         }
-        command.update(**dict_command_details)
+        communication.update(**dict_communication_details)
 
-        return command
+        return communication
 
 class lines(dict):
     """
@@ -238,7 +219,7 @@ class lines(dict):
         
         
     """
-    def __init__(self, symbol, data_type = None, include_only = None, exclude = set([c.EVENT_TYPE, c.SYMBOL]), maxlen = None, mark_line = 'CLOSE'):       
+    def __init__(self, symbol, data_type = None, include_only = None, exclude = set([c.EVENT_TYPE, c.SYMBOL, c.TOPIC]), maxlen = None, mark_line = 'CLOSE'):       
         
         self.__initialized = False
         self.symbol = symbol

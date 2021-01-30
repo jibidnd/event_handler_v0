@@ -2,13 +2,12 @@ import time
 import configparser
 
 import zmq
-import msgpack
-
 import snowflake.connector
 from snowflake.connector.converter_null import SnowflakeNoConverterToPython
 
 from ..data import BaseDataFeed
 from .. import constants as c
+from .. import utils
 
 class SnowflakeDataFeed(BaseDataFeed):
 
@@ -40,7 +39,7 @@ class SnowflakeDataFeed(BaseDataFeed):
             user = user,
             password = password,
             account = account, 
-            converter_class = SnowflakeNoConverterToPython
+            converter_class = SnowflakeNoConverterToPython  # is this not working??
         )
         # request results to be returned as dictionaries
         self.cur = self.con.cursor(snowflake.connector.DictCursor)
@@ -76,7 +75,6 @@ class SnowflakeDataFeed(BaseDataFeed):
 
 
     def publish(self):
-
         # if starting over
         if self.from_beginning:
             self.execute_query()
@@ -94,8 +92,7 @@ class SnowflakeDataFeed(BaseDataFeed):
             res = self.cur.fetchone()
 
             if res is not None:
-                # msgpack
-                res_packed = msgpack.packb(res, use_bin_type = True, default = utils.default_packer)
+                res_packed = utils.packb(res)
                 tempts = res[c.EVENT_TS]
                 # send the event with a topic
                 try:
@@ -126,6 +123,8 @@ class SnowflakeDataFeed(BaseDataFeed):
         
         # shut down gracefully
         self.shutdown()
+
+        return
     
     def shutdown(self):
         self.shutdown_flag.set()

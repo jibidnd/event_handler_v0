@@ -1,10 +1,10 @@
 import threading
 
 import zmq
-import msgpack
 
 from ..data import *
 from .. import constants as c
+from .. import utils
 
 class DatafeedSynchronizer(BaseDataFeed):
     
@@ -75,7 +75,6 @@ class DatafeedSynchronizer(BaseDataFeed):
 
 
     def publish(self):
-
         # wait for the starting signal
         self.start_sync.wait()
 
@@ -87,7 +86,7 @@ class DatafeedSynchronizer(BaseDataFeed):
             if (event := self.fetch()) is not None:
 
                 try:
-                    event_packed = msgpack.packb(event, use_bin_type = True, default = utils.default_packer)
+                    event_packed = utils.packb(event)
                     self.sock_out.send_multipart([event[c.TOPIC].encode(), event_packed], flag = zmq.NOBLOCK)
                 except zmq.ZMQError as exc:
                     # Drop messages if queue is full
