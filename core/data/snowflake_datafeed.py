@@ -39,7 +39,7 @@ class SnowflakeDataFeed(BaseDataFeed):
             user = user,
             password = password,
             account = account, 
-            converter_class = SnowflakeNoConverterToPython
+            converter_class = SnowflakeNoConverterToPython  # is this not working??
         )
         # request results to be returned as dictionaries
         self.cur = self.con.cursor(snowflake.connector.DictCursor)
@@ -75,7 +75,6 @@ class SnowflakeDataFeed(BaseDataFeed):
 
 
     def publish(self):
-
         # if starting over
         if self.from_beginning:
             self.execute_query()

@@ -4,7 +4,7 @@
 import abc
 import collections
 import uuid
-from decimal import Decimal, InvalidOperation
+import decimal
 from collections import deque
 import datetime
 import pytz
@@ -30,7 +30,7 @@ class Strategy(event_handler.EventHandler):
         self.data_address = data_address
         self.order_address = order_address
         self.logging_addresses = logging_addresses
-        self.local_tz = local_tz
+        self.local_tz = pytz.timezone(local_tz)
         self.params = params or dict()
         self.rms = rms or RMS()
 
@@ -254,7 +254,7 @@ class Strategy(event_handler.EventHandler):
                             event = socket.recv(zmq.NOBLOCK)
                         else:
                             raise Exception(f'Unanticipated socket type {socket.socket_type}')
-                        next_events[name] = utils.unpackb(event)
+                        next_events[name] = self._preprocess_event(utils.unpackb(event))
                     except zmq.ZMQError as exc:
                         if exc.errno == zmq.EAGAIN:
                             # Nothing to grab
@@ -267,6 +267,7 @@ class Strategy(event_handler.EventHandler):
             if len(next_events) > 0:
                 # Handle the socket with the next soonest event (by EVENT_TS)
                 # take the first item (socket name) of the first item ((socket name, event)) of the sorted queue
+                print(next_events)
                 next_socket = sorted(next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
                 next_event = next_events.pop(next_socket)        # remove the event from next_events
                 self._handle_event(next_event)
@@ -305,15 +306,28 @@ class Strategy(event_handler.EventHandler):
             if (len(data) == 0) or (self.clock - data[c.EVENT_TS[-1] > freq]):
                 self.to_child(symbol, c.MARK.lower())
         return self.prenext()
-    
+
+    def _preprocess_event(self, event):
+        # preprocess received events prior to handling them
+
+        # localize the event ts
+        event_ts = event[c.EVENT_TS]
+        if isinstance(event_ts, (int, float, decimal.Decimal)):
+            event_ts = utils.unix2datetime(event_ts, to_tz = self.local_tz)
+        elif isinstance(event_ts, datetime.datetime):
+            event_ts = event_ts.astimezone(self.local_tz)
+        event[c.EVENT_TS] = event_ts
+        
+        return self.preprocess_event(event)
+
     def _handle_event(self, event):
 
         # Run code that needs to be executed bofore handling any event
         self._prenext()
 
         # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
-        if (tempts := event[c.EVENT_TS]) > self.clock.timestamp():
-            self.clock = utils.unix2datetime(tempts)
+        if (event_ts := event[c.EVENT_TS]) > self.clock:
+            self.clock = event_ts
         return super()._handle_event(event)
 
 
@@ -473,7 +487,7 @@ class Strategy(event_handler.EventHandler):
             asset (str): the name / identifier of the asset
 
         Returns:
-            decimal: The last known value of the asset
+            decimal.Decimal: The last known value of the asset
         """
         # Get most recent datapoint
         if (data := self.datas.get(identifier)):
@@ -577,7 +591,7 @@ class Strategy(event_handler.EventHandler):
             child_id = child
         
         # What to send?
-        default_params = {c.EVENT_TYPE: c.COMMUNICATION, c.EVENT_SUBTYPE: c.REQUEST, c.EVENT_TS: self.clock.timestamp()}
+        default_params = {c.EVENT_TYPE: c.COMMUNICATION, c.EVENT_SUBTYPE: c.REQUEST, c.EVENT_TS: self.clock}
         communication_params = {c.SENDER_ID: self.strategy_id, c.RECEIVER_ID: child_id}
         if isinstance(message, dict):
             # add default message info
@@ -590,7 +604,7 @@ class Strategy(event_handler.EventHandler):
     
     def to_parent(self, message):
         # default message details
-        default_params = {c.EVENT_TYPE: c.COMMUNICATION, c.EVENT_SUBTYPE: c.INFO, c.EVENT_TS: self.clock.timestamp()}
+        default_params = {c.EVENT_TYPE: c.COMMUNICATION, c.EVENT_SUBTYPE: c.INFO, c.EVENT_TS: self.clock}
         communication_params = {c.SENDER_ID: self.strategy_id, c.RECEIVER_ID: self.parent}
         if isinstance(message, dict):
             # add default message info
@@ -637,19 +651,19 @@ class Strategy(event_handler.EventHandler):
             c.SYMBOL: position.symbol,
             c.ORDER_TYPE: c.MARKET,
             c.QUANTITY: quantity,
-            c.EVENT_TS: self.clock.timestamp(),
+            c.EVENT_TS: self.clock,
             c.PRICE: self.get_mark(symbol) or 0.0,
             c.QUANTITY_OPEN: quantity
             }
         
         order = {**default_order_details, **order_details}
-        for key, value in order.items():
-            try:
-                order.update({key: Decimal(value)})
-            except InvalidOperation:
-                pass
-            except:
-                raise
+        # for key, value in order.items():
+        #     try:
+        #         order.update({key: decimal.Decimal(value)})
+        #     except InvalidOperation:
+        #         pass
+        #     except:
+        #         raise
         
         return event.order_event(order)
 

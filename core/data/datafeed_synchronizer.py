@@ -75,7 +75,6 @@ class DatafeedSynchronizer(BaseDataFeed):
 
 
     def publish(self):
-
         # wait for the starting signal
         self.start_sync.wait()
 

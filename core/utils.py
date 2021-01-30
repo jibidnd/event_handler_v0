@@ -207,9 +207,15 @@ def duration_to_sec(duration):
 #         elif object is ext_type:
 #             use passed ext_hook
 
-def packb(obj):
-    # gives special handling to datetime and numeric objects
-    # msgpack strips (and discards) the tzinfo
+def default_pre_packer(obj):
+    """ "Prepacks" certain data types before passing to msgpack.
+        msgpack's default packer option kicks in after the module attempts
+        to handle the known datatypes. E.g. custom handling of float is not
+        handled.
+
+    Args:
+        obj ([type]): [description]
+    """    
     if isinstance(obj, datetime.datetime):
         if (tzinfo := obj.tzinfo) is None:
             obj = obj.astimezone(tz = None) # assumes system local timezone
@@ -220,9 +226,11 @@ def packb(obj):
             obj = decimal.Decimal(obj)
             processed = msgpack.ExtType(10, str(obj).encode('utf-8'))
         except:
-            processed = obj
-    
-    return msgpack.packb(processed, default = str)
+            processed = str(obj)    
+    return processed
+
+def packb(obj):
+    return msgpack.packb(obj, default = default_pre_packer)
 
 def ext_hook(ext_type_code, data):
     # Handle it if it is one of the pre-defined ext_types

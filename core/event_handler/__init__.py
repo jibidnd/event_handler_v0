@@ -45,6 +45,7 @@ class EventHandler(abc.ABC):
         else:
             raise Exception('Event type {} not supported.'.format(event_type))
 
+
     
     @abc.abstractmethod
     def _handle_data(self, data):
@@ -60,6 +61,12 @@ class EventHandler(abc.ABC):
     def _handle_communication(self, communication):
         return
     
+    def _preprocess_event(self, event):
+        return event
+    
+    def preprocess_event(self, event):
+        return event
+
     def handle_event(self, event):
         return
 
@@ -212,7 +219,7 @@ class lines(dict):
         
         
     """
-    def __init__(self, symbol, data_type = None, include_only = None, exclude = set([c.EVENT_TYPE, c.SYMBOL]), maxlen = None, mark_line = 'CLOSE'):       
+    def __init__(self, symbol, data_type = None, include_only = None, exclude = set([c.EVENT_TYPE, c.SYMBOL, c.TOPIC]), maxlen = None, mark_line = 'CLOSE'):       
         
         self.__initialized = False
         self.symbol = symbol
