@@ -31,15 +31,13 @@ class Position(event_handler.EventHandler):
 
     def __init__(
             self,
-            strategy,
+            owner,
             symbol,
             asset_class = c.EQUITY,
             trade_id = None,
             position_id = None
     ):
-        self.strategy = strategy
-        # self.scope = scope
-        self.strategy_id = self.strategy.strategy_id
+        self.owner = owner
         self.symbol = symbol
         self.asset_class = asset_class
         self.trade_id = trade_id or ([str(uuid.uuid1())] + list(self.strategy.open_trades.keys()))[-1]
@@ -58,13 +56,17 @@ class Position(event_handler.EventHandler):
         return self.handle_data(data)
 
     def _handle_order(self, order):
-        '''Handle order events that are generated from this strategy'''
-        # log the transaction
-        self.transactions.append(order)
+        '''Handle order events'''
 
-        event_subtype = order[c.EVENT_SUBTYPE]
+        # confirm that the order belongs to this position
+        assert order.get(c.POSITION_ID) == self.position_id,\
+            f'Order {order.get(c.ORDER_ID)} belongs to position {order.get(c.POSITION_ID)}, not {self.position_id}'
+
+        # log the transaction
+        self.transactions.append(order)        
 
         # Process order events initiated on the strategy's side
+        event_subtype = order[c.EVENT_SUBTYPE]
         if event_subtype == c.REQUESTED:
             # Order has been sent for approval
             # Treat orders as submitted
@@ -99,15 +101,6 @@ class Position(event_handler.EventHandler):
     def _handle_command(self, command):
         return self.handle_command(command)
 
-    # read only properties are computed when requested
-    @property
-    def value_open(self):
-        return self.quantity_open * self.strategy.get_mark(self.symbol)
-
-    # @property
-    # def value_pending(self):
-    #     return self.quantity_pending * self.strategy.get_mark(self.symbol)
-
     @property
     def total_pnl(self):
         '''Realized + unrealized PNL'''
@@ -122,63 +115,31 @@ class Position(event_handler.EventHandler):
         pass
 
 
-class CashPosition(event_handler.EventHandler):
+class CashPosition(Position):
     """A position in cash. Handles order a little differently than other positions
     """
     def __init__(self):
+        super().__init__()
         self.balance = 0        # updated on fills
         self.net_flow = 0       # the net deposit/withdrawals to this cash position
         self.value_pending = 0
         self.transactions = collections.deque(maxlen = None)
-    
-    def _handle_data(self, data):
-        return self.handle_data()
 
     def _handle_order(self, order):
-        '''Handle order events that are generated from this strategy'''
+        '''Handle order events'''
+
+        # confirm that the order belongs to this position
+        assert order.get(c.POSITION_ID) == self.position_id,\
+            f'Order {order.get(c.ORDER_ID)} belongs to position {order.get(c.POSITION_ID)}, not {self.position_id}'
+
+        # confirm that the order is a cashflow
+        assert order[c.SYMBOL] == c.CASH, \
+                f'Order {order.get(c.ORDER_ID)} is not a cashflow but is passed to a cash position {self.position_id}'
+
         # log the transaction
         self.transactions.append(order)
 
-        is_cashflow = order[c.SYMBOL] == c.CASH    # Deposits/withdrawals are in the form of filled cash orders
-        event_subtype = order[c.EVENT_SUBTYPE]
-        
-        if not is_cashflow:
-        # if a regular order, update cash balance as appropriate
-            # Process order events initiated on the strategy's side
-            if event_subtype == c.REQUESTED:
-                # Order has been sent for approval
-                # Treat orders as submitted
-                self.value_pending -= order[c.QUANTITY] * order[c.PRICE]    # approx fill price
-            elif event_subtype == c.SUBMITTED:
-                pass
-            elif event_subtype == c.DENIED:
-                # Order was not submitted, revert pending quantities
-                self.value_pending += order[c.QUANTITY] * order[c.PRICE]    # approx fill price
-            # Process order events initiated on the broker's side
-            elif event_subtype == c.RECEIVED:
-                # order are assumed to be received when submitted
-                # A FAILED order event would indicate otherwise
-                pass
-            elif event_subtype in [c.FILLED, c.PARTIALLY_FILLED]:
-                # Update open quantity
-                self.balance -= order[c.COMMISSION]
-                self.balance += order[c.NET]
-            elif event_subtype in [c.FAILED, c.EXPIRED, c.CANCELLED, c.REJECTED]:
-                self.value_pending -= order[c.QUANTITY] * order[c.PRICE]    # approx fill price
-        else:
-        # else a cash flow event. Update balance and net_flow accordingly
+        if order[c.EVENT_SUBTYPE] in [c.FILLED, c.PARTIALLY_FILLED]:
             self.balance += order[c.NET]
             self.net_flow += order[c.NET]
-
-        return self.handle_order(order)
-
-    def _handle_command(self, command):
-        return self.handle_command()
-
-    # for if we want to add custom action (e.g. notify on cash increase)
-    def handle_data(self, data):
-        pass
-    def handle_order(self, order):
-        pass
-    def handle_command(self, command):
-        pass
+        return
