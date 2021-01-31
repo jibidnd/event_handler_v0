@@ -13,10 +13,10 @@ import threading
 
 import zmq
 
+from .position import Position, CashPosition
 from .. import constants as c
 from .. import event_handler
 from ..event_handler import event, lines
-from .position import Position, CashPosition
 from .. import utils
 
 class Strategy(event_handler.EventHandler):
@@ -43,11 +43,12 @@ class Strategy(event_handler.EventHandler):
         self.children_update_freq = {}      # strategy_id: datetime.timedelta
         self.datas = {}
         self.data_subscriptions = (data_subscriptions or set()) | {self.strategy_id}   # list of topics subscribed to
-        self.cash = CashPosition()
+        self.cash = CashPosition(owner = self.strategy_id)
         self.open_trades = {}               # trade_id: [position_ids]
         self.closed_trades = {}             # trade_id: [position_ids]
         self.open_positions = {}            # position_id: position object
         self.closed_positions = {}          # position_id: position object  # TODO: closed positions need to be moved to closed_positions from open_positions
+        self.shares = 0
         # TODO
         self.pending_orders = {}            # orders not yet filled: order_id: order_event
 
@@ -171,6 +172,12 @@ class Strategy(event_handler.EventHandler):
         
         self.parent = parent_strategy_id
 
+        # TODO: to have parent load open positions, do:
+        # - child.add_parent
+        # - parent.add_child
+        # - child.to_parent(command({REQUEST: load_openpositions, MESSAGE: child.get_openpositionsummary}))
+        # - (parent should handle communication)
+
         return
 
     def add_child(self, symbol, child_strategy = None, child_strategy_id = None, child_update_freq = datetime.timedelta(seconds = 1)):
@@ -267,7 +274,6 @@ class Strategy(event_handler.EventHandler):
             if len(next_events) > 0:
                 # Handle the socket with the next soonest event (by EVENT_TS)
                 # take the first item (socket name) of the first item ((socket name, event)) of the sorted queue
-                print(next_events)
                 next_socket = sorted(next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
                 next_event = next_events.pop(next_socket)        # remove the event from next_events
                 self._handle_event(next_event)
@@ -286,7 +292,7 @@ class Strategy(event_handler.EventHandler):
 
         # close sockets
         for socket in [self.communication_socket, self.data_socket, self.order_socket, self.logging_socket]:
-            if (socket is not None) and (~socket.closed):
+            if (isinstance(socket, zmq.sugar.socket.Socket)) and ((socket is not None) and (~socket.closed)):
                 socket.close(linger = 10)
 
         return
@@ -300,11 +306,11 @@ class Strategy(event_handler.EventHandler):
     def _prenext(self):
         '''Prior to processing the next event'''
         # update children marks if it is time
-        for symbol, freq in self.children_update_freq.items():
-            data = self.datas[symbol]
-            # has it been a while since we had the last mark?
-            if (len(data) == 0) or (self.clock - data[c.EVENT_TS[-1] > freq]):
-                self.to_child(symbol, c.MARK.lower())
+        # for symbol, freq in self.children_update_freq.items():
+        #     data = self.datas[symbol]
+        #     # has it been a while since we had the last mark?
+        #     if (len(data) == 0) or (self.clock - data[c.EVENT_TS[-1] > freq]):
+        #         self.to_child(symbol, c.MARK.lower())
         return self.prenext()
 
     def _preprocess_event(self, event):
@@ -326,11 +332,9 @@ class Strategy(event_handler.EventHandler):
         self._prenext()
 
         # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
-        if (event_ts := event[c.EVENT_TS]) > self.clock:
-            self.clock = event_ts
+        if (event_ts := event[c.EVENT_TS]) > self.clock.timestamp():
+            self.clock = utils.unix2datetime(event_ts)
         return super()._handle_event(event)
-
-
 
     def _handle_data(self, data):
         '''Update lines in self.datas with data event'''
@@ -352,31 +356,34 @@ class Strategy(event_handler.EventHandler):
 
         Two types of order events can happen here:
         1) A "pass through"
+            - The length of the strategy chain is non-zero
             - The order is from one of the children, and subtype == REQUESTED.
                 the order is assessed by the Strategy's RMS.
                 If approved, the order is sent upchain (to the Strategy's parent),
                 or if there are no parents, sent to the broker.
                 If the Strategy's RMS rejects the order, an ORDER event with event_subtype REJECTED
                 is published to the child that requested that order.
+            - 
         2) Result of a prior order sent
-            - If the order is of subtype in [DENIED, SUBMITTED, FAILED,
-                                                RECEIVED, FILLED, PARTIALLY_FILLED, EXPIRED,
-                                                CANCELLED, REJECTED]
-                (which implies that the origin of the order is from this strategy),
-                the order is sent to the corresponding position to update the position.
+            - The strategy chain of the order has reached length 0
+            - The cash of the strategy is updated accordingly
+            - The corrsponding position is updated
+            
         '''
         event_subtype = order.get(c.EVENT_SUBTYPE)
         from_children = (order.get(c.STRATEGY_ID) in self.children.values())
         from_self = (str(order.get(c.STRATEGY_ID)) == str(self.strategy_id))
 
+        # order on the way going "up"
         if event_subtype == c.REQUESTED:
-        # receiving a REQUESTED order from one of the children
+        # receiving a REQUESTED order; implies that it is from one of the children
             # call RMS
             approved = self.rms.request_order_approval(order)
             if approved:
                 self.place_order(order)
             else:
                 self.deny_order(order)
+        # order on the way going "down"
         else:
             if len(order[c.STRATEGY_CHAIN]) == 0:
                 # update the positions that the order came from
@@ -384,13 +391,11 @@ class Strategy(event_handler.EventHandler):
                 self.cash._handle_event(order)
             else:
                 original_sender = order[c.STRATEGY_CHAIN].pop()
-                # receiving an order response for one of the children
-                # let them know
+                # receiving an order response for one of the children; let them know
                 self.to_child(original_sender, order)
 
         return self.handle_order(order)
         
-    # TODO: handle liquidation request
     def _handle_communication(self, communication):
         if communication[c.EVENT_SUBTYPE] == c.REQUEST:
 
@@ -414,10 +419,9 @@ class Strategy(event_handler.EventHandler):
             if next(iter(info.keys())) == c.MARK:
                 # messages are signed with strategy_id; need to find the symbol tracked in this strategy
                 symbol = next(key for key, value in self.children.items() if value == communication[c.SYMBOL])
-                print(symbol)
                 self.datas[symbol].update_with_data(info)
         else:
-            print(communication)
+            pass
 
 
         return
@@ -478,9 +482,32 @@ class Strategy(event_handler.EventHandler):
                 except IndexError:
                     raise Exception(f'No attribute by the name of {identifier}')
             return answer
+    
+    def get_nav(self, identifier = None):
+        # Get net asset value of a strategy
 
+        nav = 0
+        if identifier is None:
+            for position in self.open_positions:
+                if position.asset_class != c.STRATEGY:
+                    nav += self.get_mark(position.symbol) * position.quantity_open
+        else:
+            for position in self.open_positions:
+                if position.owner == identifier:
+                    nav += self.get_mark(position.symbol) * position.quantity_open
+        return nav
+    
+    def get_ncf(self, identifier = None):
+        # Get net cash flow of a position
+        identifier = identifier or self.strategy_id
+        
+        ncf = 0
+        for position in self.open_positions:
+            if (position.owner == identifier) and (position.symbol == c.CASH):
+                ncf += (position.credit - position.debit)
+        return ncf
 
-    def get_mark(self, identifier):
+    def get_mark(self, identifier = None):
         """Get the mark of an asset
 
         Args:
@@ -489,53 +516,108 @@ class Strategy(event_handler.EventHandler):
         Returns:
             decimal.Decimal: The last known value of the asset
         """
-        # Get most recent datapoint
-        if (data := self.datas.get(identifier)):
+
+        # If this is something whose value we already track
+        if (data := self.datas.get(identifier)) is not None:
             return data.mark[-1]
+        elif identifier == c.CASH:
+            return 1.00
         else:
-            return None
+            # Get NAV
+            nav = self.get_nav(identifier)
+            # Get number of shares
+            if identifier is None:
+                shares = self.shares
+            else:
+                position = None
+                for position_i in self.open_positions.values():
+                    if position_i.symbol == identifier:
+                        position = position_i
+                        break
+                assert position is not None, f'No positions with symbol {identifier}.'
+                shares = position.quantity_open
+            
+            return nav / shares
 
-    def value_open(self, identifier = None):
-        """
-        This is the sum of values of current open positions, EXCLUDING CASH.
-        Value is calculated using self.get_mark.
+    def get_totalpnl(self, identifier = None):
 
-        Args:
-            identifier (str, optional): Could be a symbol, trade_id, or position_id.
-                If None, returns the value of all open positions in the strategy. Defaults to None.
-
-        Returns:
-            value: the open value of the requested item.
-        """
-        if identifier is None:
-            # sum value of all open positions
-            v = sum([position.value_open for position_id, position in self.open_positions.items()])
+        if identifier == c.CASH:
+            return 0.0
         else:
-            # sum value of all open positions having any of (trade_id, position_id, symbol) matching identifier
-            v = sum([position.value_open for position_id, position in self.open_positions.items()
-                        if identifier in (position_id, position.trade_id, position.symbol)])
-        return v
+            return self.get_ncf(identifier) + self.get_nav(identifier)
     
-    def value_pending(self, identifier = None):
-        """
-        This is the sum of pending values of current open positions.
-        Value is calculated using self.get_mark.
+    def get_openpositionsummary(self):
+        '''summarize current positions on the owner/symbol level'''
+        d = {}
+        for position in self.open_positions:
+            if position.owner not in d.keys():
+                d[position.owner] = {}
+                d[position.owner][position.symbol] = position.to_dict()
+            elif position.symbol not in d[position.owner].keys():
+                d[position.owner][position.symbol] = position.to_dict()
+            else:
+                d[position.owner][position.symbol]['risk'] += position.risk
+                d[position.owner][position.symbol]['quantity_open'] += position.quantity_open
+                d[position.owner][position.symbol]['quantity_pending'] += position.quantity_pending
+                d[position.owner][position.symbol]['commission'] += position.commission
+                d[position.owner][position.symbol]['credit'] += position.credit
+                d[position.owner][position.symbol]['debit'] += position.debit
+        return d
+    
+    def load_openpositions(self, openpositionsummary: dict):
+        '''Create open positions from a dicionary of open position summary'''
+        for owner_summary in openpositionsummary.values():
+            for owner_symbol_summary in owner_summary.values():
+                position = Position(
+                    symbol = owner_symbol_summary['symbol'],
+                    owner = owner_symbol_summary['owner'],
+                    asset_class = owner_symbol_summary['asset_class'])
+                position.__dict__.update(owner_symbol_summary)
+                self.open_positions[position.position_id] = position
 
-        Args:
-            identifier (str, optional): Could be a symbol, trade_id, or position_id.
-                If None, returns the value of all open positions in the strategy. Defaults to None.
 
-        Returns:
-            value: the open value of the requested item.
-        """
-        if identifier is None:
-            # sum value of all open positions
-            v = sum([position.value_pending for position_id, position in self.open_positions.items()])
-        else:
-            # sum value of all open positions having any of (trade_id, position_id, symbol) matching identifier
-            v = sum([position.value_pending for position_id, position in self.open_positions.items()
-                        if identifier in (position_id, position.trade_id, position.symbol)])
-        return v
+
+    # def value_open(self, identifier = None):
+    #     """
+    #     This is the sum of values of current open positions, EXCLUDING CASH.
+    #     Value is calculated using self.get_mark.
+
+    #     Args:
+    #         identifier (str, optional): Could be a symbol, trade_id, or position_id.
+    #             If None, returns the value of all open positions in the strategy. Defaults to None.
+
+    #     Returns:
+    #         value: the open value of the requested item.
+    #     """
+    #     if identifier is None:
+    #         # sum value of all open positions
+    #         v = sum([position.value_open for position_id, position in self.open_positions.items()])
+    #     else:
+    #         # sum value of all open positions having any of (trade_id, position_id, symbol) matching identifier
+    #         v = sum([position.value_open for position_id, position in self.open_positions.items()
+    #                     if identifier in (position_id, position.trade_id, position.symbol)])
+    #     return v
+    
+    # def value_pending(self, identifier = None):
+    #     """
+    #     This is the sum of pending values of current open positions.
+    #     Value is calculated using self.get_mark.
+
+    #     Args:
+    #         identifier (str, optional): Could be a symbol, trade_id, or position_id.
+    #             If None, returns the value of all open positions in the strategy. Defaults to None.
+
+    #     Returns:
+    #         value: the open value of the requested item.
+    #     """
+    #     if identifier is None:
+    #         # sum value of all open positions
+    #         v = sum([position.value_pending for position_id, position in self.open_positions.items()])
+    #     else:
+    #         # sum value of all open positions having any of (trade_id, position_id, symbol) matching identifier
+    #         v = sum([position.value_pending for position_id, position in self.open_positions.items()
+    #                     if identifier in (position_id, position.trade_id, position.symbol)])
+    #     return v
 
     def total_pnl(self, identifier = None):
         # TODO: identifier can be a trade or a symbol
@@ -556,23 +638,23 @@ class Strategy(event_handler.EventHandler):
                 raise Exception('position not found')
         return credit + self.value_open - debit
 
-    @property
-    def net_asset_value(self):
-        """
-        This is the sum of cash and values of current open positions.
-        """
-        # pending orders do not affect cash balance
-        nav = sum([position.value_open for position_id, position in self.open_positions.items()])
-        nav += self.cash.balance
-        return nav
+    # @property
+    # def net_asset_value(self):
+    #     """
+    #     This is the sum of cash and values of current open positions.
+    #     """
+    #     # pending orders do not affect cash balance
+    #     nav = sum([position.value_open for position_id, position in self.open_positions.items()])
+    #     nav += self.cash.balance
+    #     return nav
     
-    @property
-    def mark(self):
-        """NAV / total cash deposited"""
-        if self.cash.net_flow != 0:
-            return self.net_asset_value / self.cash.net_flow
-        else:
-            return self.net_asset_value
+    # @property
+    # def mark(self):
+    #     """NAV / total cash deposited"""
+    #     if self.cash.net_flow != 0:
+    #         return self.net_asset_value / self.cash.net_flow
+    #     else:
+    #         return self.net_asset_value
 
     def to_child(self, child, message):
         '''
@@ -611,7 +693,6 @@ class Strategy(event_handler.EventHandler):
             message = {**default_params, **message, **communication_params}
         elif isinstance(message, str):
             message = {**default_params, c.MESSAGE: message, **communication_params}
-        print(message)
         self.communication_socket.send(utils.packb(message))
 
         return
@@ -620,8 +701,11 @@ class Strategy(event_handler.EventHandler):
     # ----------------------------------------------------------------------------------------------------
     # Action stuff
     # ----------------------------------------------------------------------------------------------------
-    def create_position(self, symbol, asset_class = c.EQUITY, trade_id = None, position_id = None):
-        position = Position(strategy = self, symbol = symbol, asset_class = asset_class, trade_id = trade_id, position_id = position_id)
+    def create_position(self, symbol, owner = None, asset_class = c.EQUITY, trade_id = None, position_id = None):
+        
+        owner = owner or self.strategy_id
+
+        position = Position(symbol = symbol, owner = owner, asset_class = asset_class, trade_id = trade_id, position_id = position_id)
         self.open_positions[position.position_id] = position
         return position
 
@@ -647,24 +731,18 @@ class Strategy(event_handler.EventHandler):
             c.STRATEGY_ID: self.strategy_id,
             c.TRADE_ID: position.trade_id,
             c.POSITION_ID: position.position_id,
+            c.ASSET_CLASS: c.EQUITY,
             c.ORDER_ID: str(uuid.uuid1()),
             c.SYMBOL: position.symbol,
             c.ORDER_TYPE: c.MARKET,
             c.QUANTITY: quantity,
-            c.EVENT_TS: self.clock,
+            c.EVENT_TS: self.clock.timestamp(),
             c.PRICE: self.get_mark(symbol) or 0.0,
             c.QUANTITY_OPEN: quantity
             }
         
         order = {**default_order_details, **order_details}
-        # for key, value in order.items():
-        #     try:
-        #         order.update({key: decimal.Decimal(value)})
-        #     except InvalidOperation:
-        #         pass
-        #     except:
-        #         raise
-        
+
         return event.order_event(order)
 
     def place_order(self, order):
@@ -674,22 +752,32 @@ class Strategy(event_handler.EventHandler):
         place the order to the broker.
         Assumes that any RMS action has already been performed.
 
-        The order must contain position_id to update the corresponding positions.
+        If it is not a pass through order (from children), the order must contain position_id.
         '''
         pass_through = (str(order[c.STRATEGY_ID]) != str(self.strategy_id))
-        assert (position_id := order.get(c.POSITION_ID)) is not None, 'Order must belong to a position.'
+        
 
         if not pass_through:
+            assert (position_id := order.get(c.POSITION_ID)) is not None, 'Order must belong to a position.'
             # Update the position with the order
             self.open_positions[position_id]._handle_order(order)
             # update cash
             self.cash._handle_event(order)
+        else:
+            # update tracked children position
+            matching_positions = [position for position in self.open_positions.values() if (position.owner == order[c.STRATEGY_ID]) and (position.symbol == order[c.SYMBOL])]
+            if len(matching_positions) == 0:
+                position = self.create_position(symbol = order[c.SYMBOL], owner = order[c.STRATEGY_ID], asset_class = order[c.ASSET_CLASS])
+            else:
+                position = matching_positions[0]
+            position._handle_event(order)
         
         # add self to chain
         if (strategy_chain := order.get(c.STRATEGY_CHAIN)) is None:
             order.update({c.STRATEGY_CHAIN: [self.strategy_id]})
         else:
             order[c.STRATEGY_CHAIN].append(self.strategy_id)
+        
         # place the order
         if self.parent is None:
             self.order_socket.send(utils.packb(order))
@@ -727,7 +815,7 @@ class Strategy(event_handler.EventHandler):
         # If this is a child strategy, send them the note
         elif id_or_symbol in self.children.keys():
             self.to_child(id_or_symbol, c.LIQUIDATE)
-        elif (id_or_symbol in [position.symbol for position in self.open_positions]):
+        elif (id_or_symbol in [position.symbol for position in self.open_positions.values()]):
             for position in self.open_positions.values():
                 if position.symbol == id_or_symbol:
                     closing_order = {c.QUANTITY: -position.quantity_open}

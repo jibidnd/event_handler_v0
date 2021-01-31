@@ -1,4 +1,5 @@
 import collections
+import copy
 
 import uuid
 from decimal import Decimal
@@ -148,32 +149,33 @@ class Broker(event_handler.EventHandler):
         pass
 
     def take_order(self, order):
-        if order[c.EVENT_SUBTYPE] == c.REQUESTED:
-            if order[c.ORDER_TYPE] in [c.MARKET, c.LIMIT]:
+        _order = copy.deepcopy(order)
+        if _order[c.EVENT_SUBTYPE] == c.REQUESTED:
+            if _order[c.ORDER_TYPE] in [c.MARKET, c.LIMIT]:
                 # Add to open orders
-                order_id = order[c.ORDER_ID]
+                order_id = _order[c.ORDER_ID]
                 # change order status to subitted
-                order[c.EVENT_SUBTYPE] = c.SUBMITTED
+                _order[c.EVENT_SUBTYPE] = c.SUBMITTED
                 # add quantity open field if none set
-                if order.get(c.QUANTITY_OPEN) is None:
-                    order[c.QUANTITY_OPEN] = order[c.QUANTITY]
-                if order.get(c.QUANTITY_FILLED) is None:
-                    order[c.QUANTITY_FILLED] = 0
+                if _order.get(c.QUANTITY_OPEN) is None:
+                    _order[c.QUANTITY_OPEN] = _order[c.QUANTITY]
+                if _order.get(c.QUANTITY_FILLED) is None:
+                    _order[c.QUANTITY_FILLED] = 0
                 # Add to the collection
-                self.open_orders[order_id] = order
+                self.open_orders[order_id] = _order
 
                 # acknowledge acceptance of order (with submitted status)
-                return order
+                return copy.deepcopy(_order)
 
-            elif order[c.ORDER_TYPE] == c.CANCELLATION:
+            elif _order[c.ORDER_TYPE] == c.CANCELLATION:
                 # remove from open orders and acknowledge cancellation
                 try:
-                    cancelled_order = self.open_orders.pop(order[c.ORDER_ID])
-                    cancelled_order = order.update({c.EVENT_TS: self.clock, c.EVENT_SUBTYPE: c.CANCELLED})
+                    cancelled_order = self.open_orders.pop(_order[c.ORDER_ID])
+                    cancelled_order = _order.update({c.EVENT_TS: self.clock, c.EVENT_SUBTYPE: c.CANCELLED})
                 except KeyError:
-                    cancelled_order = order.update({c.EVENT_TS: self.clock, c.EVENT_SUBTYPE: c.INVALID})
+                    cancelled_order = _order.update({c.EVENT_TS: self.clock, c.EVENT_SUBTYPE: c.INVALID})
                 finally:
-                    return cancelled_order
+                    return copy.deepcopy(cancelled_order)
 
 
     def try_fill_with_data(self, data):
@@ -209,7 +211,7 @@ class Broker(event_handler.EventHandler):
                         else:
                             open_order[c.EVENT_SUBTYPE] = c.PARTIALLY_FILLED
                         
-                        fills.append(open_order)
+                        fills.append(open_order.copy())
             
             # closed orders from self.open_orders to self.closed_orders
             for order_id in closed:

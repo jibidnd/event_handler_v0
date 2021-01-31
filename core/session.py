@@ -323,6 +323,9 @@ class Session:
 
             elif socket_mode == c.NONE:
                 
+                # Communication with broker
+                strategy.order_socket = self.order_socket_emulator
+
                 # connect to the socket emulator
                 strategy.communication_socket = self.communication_socket_emulator
             
@@ -422,7 +425,7 @@ class Session:
             else:
                 while True:
                     try:
-                        order = self.order_deque.pop_left()
+                        order = self.order_deque.popleft()
 
                         # find a broker
                         if (broker := order.get(c.BROKER)) is None:
@@ -469,18 +472,18 @@ class Session:
 
             # STEP 4: STRATEGIES HANDLE DATA
             # -----------------------------------------------------------------------------------------------------
-            # if STRATEGIES_FULL, send data via socket
-            if socket_mode == c.STRATEGIES_FULL:
-                # prepare the data
-                topic_encoded = next_data[c.TOPIC].encode('utf-8')
-                data_packed = utils.packb(next_data)
-                msg = self.data_subscriber_socket.send_multipart([topic_encoded, data_packed], copy = False, track = True)
-                msg.wait()
-            # otherwise have strategies directly handle the data event
-            else:
-                for strategy_id, strategy in self.strategies.items():
-                    if next_data[c.TOPIC] in strategy.data_subscriptions:
-                        strategy._handle_event(next_data)
+                # if STRATEGIES_FULL, send data via socket
+                if socket_mode == c.STRATEGIES_FULL:
+                    # prepare the data
+                    topic_encoded = next_data[c.TOPIC].encode('utf-8')
+                    data_packed = utils.packb(next_data)
+                    msg = self.data_subscriber_socket.send_multipart([topic_encoded, data_packed], copy = False, track = True)
+                    msg.wait()
+                # otherwise have strategies directly handle the data event
+                else:
+                    for strategy_id, strategy in self.strategies.items():
+                        if next_data[c.TOPIC] in strategy.data_subscriptions:
+                            strategy._handle_event(next_data)
 
             # STEP 5: RESOLVE COMMUNICATION
             # -----------------------------------------------------------------------------------------------------

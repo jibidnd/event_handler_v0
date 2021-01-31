@@ -130,6 +130,7 @@ class event:
             c.EVENT_SUBTYPE: c.REQUESTED,
             c.EVENT_TS: datetime.datetime.now().timestamp(),
             c.SYMBOL: None,
+            c.ASSET_CLASS: c.EQUITY,
             c.ORDER_TYPE: c.MARKET,
             c.PRICE: None,
             c.QUANTITY: None,
