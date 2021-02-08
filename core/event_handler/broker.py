@@ -326,8 +326,7 @@ def immediate_fill(order, data, fill_strategy = c.CLOSE, commission = 0.0):
         # update the fill price
         order[c.CREDIT] += (-q) * p if q < 0 else 0
         order[c.DEBIT] += q * p if q > 0 else 0
-        order[c.NET] = order[c.CREDIT] - order[c.DEBIT]
-        order[c.AVERAGE_PRICE] = abs(order[c.NET]) / order[c.QUANTITY_FILLED]
+        order[c.AVERAGE_PRICE] = abs(order[c.CREDIT] - order[c.DEBIT]) / order[c.QUANTITY_FILLED]
         order[c.EVENT_TS] = data[c.EVENT_TS] #+ data[c.MULTIPLIER] * data[c.RESOLUTION] / 2
         return True
     else:

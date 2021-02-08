@@ -141,9 +141,9 @@ class event:
             # order fill information
             c.QUANTITY_OPEN: None,
             c.QUANTITY_FILLED: None,
+            # credit, debit, and net are changes to order[strategy_id]
             c.CREDIT: 0,
             c.DEBIT: 0,
-            c.NET: 0,
             c.BROKER: None,
             c.COMMISSION: 0
         }
@@ -152,20 +152,20 @@ class event:
 
         return order
     
-    @staticmethod
-    def cashflow_order(amount, **dict_order_details):
-        """Create an order event for deposit/withdrawal of cash.
+    # @staticmethod
+    # def cashflow_order(amount, **dict_order_details):
+    #     """Create an order event for deposit/withdrawal of cash.
 
-        Args:
-            amount (numeric): amount of cash to add (negative for withdrawals).
-        """
-        o = order_event({
-            c.SYMBOL: c.CASH,
-            c.CREDIT: max(amount, 0),
-            c.DEBIT: min(amount, 0),
-            c.NET: amount
-            }).update(**dict_order_details)
-        return o
+    #     Args:
+    #         amount (numeric): amount of cash to add (negative for withdrawals).
+    #     """
+    #     o = order_event({
+    #         c.SYMBOL: c.CASH,
+    #         c.CREDIT: max(amount, 0),
+    #         c.DEBIT: min(amount, 0),
+    #         c.NET: amount
+    #         }).update(**dict_order_details)
+    #     return o
 
     @staticmethod
     def data_event(dict_data_details = {}):
@@ -192,7 +192,8 @@ class event:
         communication = {
             c.EVENT_TYPE: c.COMMUNICATION,
             c.EVENT_SUBTYPE: c.REQUEST,
-            c.EVENT_TS: datetime.datetime.now()
+            c.EVENT_TS: datetime.datetime.now(),
+            c.CONTEXT: None
         }
         communication.update(**dict_communication_details)
 

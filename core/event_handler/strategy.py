@@ -10,6 +10,9 @@ import datetime
 import pytz
 import time
 import threading
+import copy
+
+import json
 
 import zmq
 
@@ -40,15 +43,15 @@ class Strategy(event_handler.EventHandler):
         self.children = {}                  # name: strategy_id
         # If given, sends request to children in self.prenext
         # Otherwise children will only update with marks when prompted by self.to_child
-        self.children_update_freq = {}      # strategy_id: datetime.timedelta
+        # self.children_update_freq = {}      # strategy_id: datetime.timedelta
         self.datas = {}
         self.data_subscriptions = (data_subscriptions or set()) | {self.strategy_id}   # list of topics subscribed to
-        self.cash = CashPosition(owner = self.strategy_id)
         self.open_trades = {}               # trade_id: [position_ids]
         self.closed_trades = {}             # trade_id: [position_ids]
         self.open_positions = {}            # position_id: position object
         self.closed_positions = {}          # position_id: position object  # TODO: closed positions need to be moved to closed_positions from open_positions
-        self.shares = 0
+        self.shares = None                  # if none specified, shares will be set to $invested when add_cash is called for the first time.
+        self.cash = CashPosition(owner = self.strategy_id); self.open_positions[self.cash.position_id] = self.cash
         # TODO
         self.pending_orders = {}            # orders not yet filled: order_id: order_event
 
@@ -73,6 +76,22 @@ class Strategy(event_handler.EventHandler):
         if self.logging_addresses is not None:
             for logging_address in logging_addresses:
                 self.connect_logging_socket(logging_address)
+
+    def __str__(self):
+
+        keys = ['name', 'params', 'parent', 'strategy_id', 'children', 'shares']
+        d = {}
+        for key in keys:
+            d.update({key: self.__dict__[key]})
+
+        d.update({'nav': self.get_nav()})
+        try:
+            d.update({'mark': self.get_mark()})
+        except:
+            pass
+        d.update({'cash': self.cash.quantity_open})
+
+        return repr(d)
 
     # ----------------------------------------------------------------------------------------------------
     # Communication stuff
@@ -166,7 +185,7 @@ class Strategy(event_handler.EventHandler):
         """
         # if child_strategy is provided, attempt to get these information
         if parent_strategy is not None:
-            parent_strategy_id = parent_strategy.get(c.STRATEGY_ID.lower())
+            parent_strategy_id = parent_strategy.get(c.STRATEGY_ID)
         
         assert (parent_strategy_id) is not None, 'Need strategy_id of parent being added.'
         
@@ -185,36 +204,75 @@ class Strategy(event_handler.EventHandler):
         
         Args:
             symbol (str): name of the child. Must be unique in the strategy across the set of all symbols (i.e. including tickers).
-            child_strategy (Strategy or supports .get): if provided, will be used to get child_strategy_id.
+            child_strategy (Strategy): if provided, will be used to get child_strategy_id and current open positions.
             child_strategy_id (str): The strategy_id to identify the (existing) child by. If None, must be provided by child_strategy.
             child_update_freq (datetime.timedelta): How often the child's mark should be updated.
                                                     To update constantly (each _prenext), set to <0.
         """
         # if child_strategy is provided, attempt to get these information
         if child_strategy is not None:
-            child_strategy_id = child_strategy.get(c.STRATEGY_ID.lower())
-        
+            child_strategy_id = child_strategy.get(c.STRATEGY_ID)
+
         assert (child_strategy_id) is not None, 'Need strategy_id of child being added.'
         
         # Add the child
         self.children[symbol] = child_strategy_id
-        self.children_update_freq[symbol] = child_update_freq
-        
-        # Track child data
-        self.datas[symbol] = lines(symbol, data_type = c.TICK)
 
         # Add a position for the child strategy
         self.create_position(symbol, asset_class = c.STRATEGY)
 
+        # open position summary should be provided as either
+        # - an element in dictionary if child_strategy is a dictionary
+        # - get_openpositionsummary if child_strategy is a strategy
+        # - via the communication channel (i.e. for a remote child add by strategy_id only, the communication channel must already be running)
+        openpositionsummary = None
+        try:
+            openpositionsummary = child_strategy.get_openpositionsummary()
+        except AttributeError:
+            try:
+                openpositionsummary = child_strategy.get('openpositionsummary')
+            except:
+                if self.communication_socket is not None:
+                    self.to_child(symbol, {c.TOPIC: 'openpositionsummary', c.MESSAGE: 'get_openpositionsummary'})
+                else:
+                    raise Exception(f'Unable to get open position summary for child {symbol}')
+
+        self.load_openpositions(openpositionsummary)
+
         return
 
+    def add_cash(self, amount):
+        '''Adds cash to the cash position by creating a "filled" order event.
+            `amount` is net change of cash to self.
+        '''
+        nav_0 = self.get_nav()
 
+        cash = {
+            c.STRATEGY_ID: self.strategy_id,
+            c.EVENT_TYPE: c.ORDER,
+            c.EVENT_SUBTYPE: c.CASHFLOW,
+            c.EVENT_TS: self.clock.timestamp(),
+            c.SYMBOL: self.strategy_id,
+            c.ASSET_CLASS: c.STRATEGY,
+            c.CREDIT: amount if amount > 0 else 0,
+            c.DEBIT: amount if amount < 0 else 0
+        }
+        self.cash._handle_event(cash)
+
+        # dilute shares so that the mark of the position is not changed by adding cash
+        if self.shares is None:
+            self.shares = self.cash.investment
+        else:
+            self.shares = self.shares * (self.get_nav() + amount) / nav_0
+
+        return
     # ----------------------------------------------------------------------------------------------------
     # Session stuff
     # ----------------------------------------------------------------------------------------------------
     
     def before_start(self):
         '''Things to be run before start'''
+        pass
 
     def start(self):
         '''Initialization. Things to be run before starting to handle events.'''
@@ -305,12 +363,6 @@ class Strategy(event_handler.EventHandler):
 
     def _prenext(self):
         '''Prior to processing the next event'''
-        # update children marks if it is time
-        # for symbol, freq in self.children_update_freq.items():
-        #     data = self.datas[symbol]
-        #     # has it been a while since we had the last mark?
-        #     if (len(data) == 0) or (self.clock - data[c.EVENT_TS[-1] > freq]):
-        #         self.to_child(symbol, c.MARK.lower())
         return self.prenext()
 
     def _preprocess_event(self, event):
@@ -371,29 +423,30 @@ class Strategy(event_handler.EventHandler):
             
         '''
         event_subtype = order.get(c.EVENT_SUBTYPE)
-        from_children = (order.get(c.STRATEGY_ID) in self.children.values())
-        from_self = (str(order.get(c.STRATEGY_ID)) == str(self.strategy_id))
 
         # order on the way going "up"
         if event_subtype == c.REQUESTED:
-        # receiving a REQUESTED order; implies that it is from one of the children
+            # receiving a REQUESTED order; implies that it is from one of the children
             # call RMS
             approved = self.rms.request_order_approval(order)
             if approved:
                 self.place_order(order)
+                return
             else:
                 self.deny_order(order)
+                return
         # order on the way going "down"
         else:
-            if len(order[c.STRATEGY_CHAIN]) == 0:
-                # update the positions that the order came from
-                self.open_positions[order[c.POSITION_ID]]._handle_event(order)
-                self.cash._handle_event(order)
-            else:
+            print(self.strategy_id)
+            print(order)
+            # update positions
+            self.positions_handle_order(order)
+            # pass it down if this strategy is not the final destination
+            order = self.format_strategy_chain(order, c.DOWN)
+            if len(order[c.STRATEGY_CHAIN]) != 0:
                 original_sender = order[c.STRATEGY_CHAIN].pop()
-                # receiving an order response for one of the children; let them know
                 self.to_child(original_sender, order)
-
+        
         return self.handle_order(order)
         
     def _handle_communication(self, communication):
@@ -416,13 +469,15 @@ class Strategy(event_handler.EventHandler):
         elif communication[c.EVENT_SUBTYPE] == c.INFO:
             # handling info
             info = communication[c.MESSAGE]
-            if next(iter(info.keys())) == c.MARK:
-                # messages are signed with strategy_id; need to find the symbol tracked in this strategy
-                symbol = next(key for key, value in self.children.items() if value == communication[c.SYMBOL])
-                self.datas[symbol].update_with_data(info)
+            # current open positions
+            if communication[c.TOPIC] == 'openpositionsummary':
+                self.load_openpositions(info)
+            # if next(iter(info.keys())) == c.MARK:
+            #     # messages are signed with strategy_id; need to find the symbol tracked in this strategy
+            #     symbol = next(key for key, value in self.children.items() if value == communication[c.SYMBOL])
+            #     self.datas[symbol].update_with_data(info)
         else:
             pass
-
 
         return
 
@@ -484,27 +539,35 @@ class Strategy(event_handler.EventHandler):
             return answer
     
     def get_nav(self, identifier = None):
-        # Get net asset value of a strategy
+        # Get net asset value of a strategy / asset
 
         nav = 0
         if identifier is None:
-            for position in self.open_positions:
+            for position in self.open_positions.values():
                 if position.asset_class != c.STRATEGY:
-                    nav += self.get_mark(position.symbol) * position.quantity_open
+                    if position.quantity_open != 0:
+                        nav += self.get_mark(position.symbol) * position.quantity_open
         else:
-            for position in self.open_positions:
-                if position.owner == identifier:
-                    nav += self.get_mark(position.symbol) * position.quantity_open
+            for position in self.open_positions.values():
+                if (position.owner == identifier) or ((position.symbol == identifier) and (position.asset_class != c.STRATEGY)): # ??
+                    if position.quantity_open != 0:
+                        nav += self.get_mark(position.symbol) * position.quantity_open
         return nav
     
     def get_ncf(self, identifier = None):
-        # Get net cash flow of a position
+        '''
+            Get the net cash flow caused by a position/strategy.
+            If identifier is None (default), gets the net cash flow caused
+            by the strategy to the account holding the strategy.
+        '''
         identifier = identifier or self.strategy_id
         
         ncf = 0
-        for position in self.open_positions:
-            if (position.owner == identifier) and (position.symbol == c.CASH):
+        for position in self.open_positions.values():
+            if (position.owner == identifier) or (position.symbol == identifier):
                 ncf += (position.credit - position.debit)
+                # if position.symbol == c.CASH:
+                #     ncf -= position.investment
         return ncf
 
     def get_mark(self, identifier = None):
@@ -517,16 +580,21 @@ class Strategy(event_handler.EventHandler):
             decimal.Decimal: The last known value of the asset
         """
 
+        if identifier in self.children.keys():
+            identifier = self.children[identifier]
+
         # If this is something whose value we already track
         if (data := self.datas.get(identifier)) is not None:
             return data.mark[-1]
         elif identifier == c.CASH:
-            return 1.00
-        else:
+            return decimal.Decimal(1.00)
+        elif identifier in self.children.values():
             # Get NAV
             nav = self.get_nav(identifier)
             # Get number of shares
             if identifier is None:
+                assert self.shares is not None, \
+                    'Number of shares not defined. Is there any cash in the strategy?'
                 shares = self.shares
             else:
                 position = None
@@ -537,7 +605,12 @@ class Strategy(event_handler.EventHandler):
                 assert position is not None, f'No positions with symbol {identifier}.'
                 shares = position.quantity_open
             
-            return nav / shares
+            mark = nav / shares
+
+            return mark
+        else:
+            raise Exception(f'Unable to get mark for {identifier}')
+
 
     def get_totalpnl(self, identifier = None):
 
@@ -549,12 +622,12 @@ class Strategy(event_handler.EventHandler):
     def get_openpositionsummary(self):
         '''summarize current positions on the owner/symbol level'''
         d = {}
-        for position in self.open_positions:
+        for position in self.open_positions.values():
             if position.owner not in d.keys():
                 d[position.owner] = {}
-                d[position.owner][position.symbol] = position.to_dict()
+                d[position.owner][position.symbol] = position.get_summary()
             elif position.symbol not in d[position.owner].keys():
-                d[position.owner][position.symbol] = position.to_dict()
+                d[position.owner][position.symbol] = position.get_summary()
             else:
                 d[position.owner][position.symbol]['risk'] += position.risk
                 d[position.owner][position.symbol]['quantity_open'] += position.quantity_open
@@ -568,10 +641,18 @@ class Strategy(event_handler.EventHandler):
         '''Create open positions from a dicionary of open position summary'''
         for owner_summary in openpositionsummary.values():
             for owner_symbol_summary in owner_summary.values():
-                position = Position(
-                    symbol = owner_symbol_summary['symbol'],
-                    owner = owner_symbol_summary['owner'],
-                    asset_class = owner_symbol_summary['asset_class'])
+                # convert owner to internal symbol if direct child
+                if owner_symbol_summary['owner'] in self.children.values():
+                    owner_symbol_summary['owner'] = [symbol for symbol, strategy_id in self.children.items() if strategy_id == owner_symbol_summary['owner']][0]
+                # Create a dummy position
+                if owner_symbol_summary['asset_class'] == c.CASH:
+                    position = CashPosition(owner = owner_symbol_summary['owner'])
+                else:
+                    position = Position(
+                        symbol = owner_symbol_summary['symbol'],
+                        owner = owner_symbol_summary['owner'],
+                        asset_class = owner_symbol_summary['asset_class'])
+                # update the dummy position with details
                 position.__dict__.update(owner_symbol_summary)
                 self.open_positions[position.position_id] = position
 
@@ -619,24 +700,24 @@ class Strategy(event_handler.EventHandler):
     #                     if identifier in (position_id, position.trade_id, position.symbol)])
     #     return v
 
-    def total_pnl(self, identifier = None):
-        # TODO: identifier can be a trade or a symbol
-        '''Realized + unrealized PNL'''
-        if identifier is None:
-            credit = sum([position.credit for position_id, position in self.open_positions.items()]) \
-                        + sum([position.credit for position_id, position in self.closed_positions.items()])
-            debit = sum([position.debit for position_id, position in self.open_positions.itmes()]) \
-                        + sum([position.debit for position_id, position in self.closed_positions.itmes()]) 
-        else:
-            if identifier in self.open_positions.keys():
-                credit = self.open_positions[identifier].credit
-                debit = self.open_positions[identifier].debit
-            elif identifier in self.closed_positions.keys():
-                credit = self.closed_positions[identifier].credit
-                debit = self.closed_positions[identifier].debit
-            else:
-                raise Exception('position not found')
-        return credit + self.value_open - debit
+    # def total_pnl(self, identifier = None):
+    #     # TODO: identifier can be a trade or a symbol
+    #     '''Realized + unrealized PNL'''
+    #     if identifier is None:
+    #         credit = sum([position.credit for position_id, position in self.open_positions.items()]) \
+    #                     + sum([position.credit for position_id, position in self.closed_positions.items()])
+    #         debit = sum([position.debit for position_id, position in self.open_positions.items()]) \
+    #                     + sum([position.debit for position_id, position in self.closed_positions.items()]) 
+    #     else:
+    #         if identifier in self.open_positions.keys():
+    #             credit = self.open_positions[identifier].credit
+    #             debit = self.open_positions[identifier].debit
+    #         elif identifier in self.closed_positions.keys():
+    #             credit = self.closed_positions[identifier].credit
+    #             debit = self.closed_positions[identifier].debit
+    #         else:
+    #             raise Exception('position not found')
+    #     return credit + self.value_open - debit
 
     # @property
     # def net_asset_value(self):
@@ -681,7 +762,6 @@ class Strategy(event_handler.EventHandler):
         elif isinstance(message, str):
             message = {**default_params, c.MESSAGE: message, **communication_params}
         self.communication_socket.send(utils.packb(message))
-
         return
     
     def to_parent(self, message):
@@ -697,28 +777,75 @@ class Strategy(event_handler.EventHandler):
 
         return
 
+    def format_strategy_chain(self, event, direction):
+        """Creates/adds to the trace of communication.
+            If event is on the way up, add self to the end of the chain.
+            If event is on the way down, remove self from the end of the chain.
+
+        Args:
+            event (dict-like): The event to be processed.
+            direction (UP / DOWN): [description]
+        """
+        if c.STRATEGY_CHAIN not in event.keys():
+            event[c.STRATEGY_CHAIN] = []
+        try:
+            # make it so that the last item is not self
+            last = event[c.STRATEGY_CHAIN].pop()
+            if last != self.strategy_id:
+                event[c.STRATEGY_CHAIN].append(last)
+        except IndexError:
+            pass
+        except:
+            raise
+
+        if direction == c.UP:
+            event[c.STRATEGY_CHAIN].append(self.strategy_id)
+        
+        return event
 
     # ----------------------------------------------------------------------------------------------------
     # Action stuff
     # ----------------------------------------------------------------------------------------------------
-    def create_position(self, symbol, owner = None, asset_class = c.EQUITY, trade_id = None, position_id = None):
+    def create_position(self, symbol, owner = None, asset_class = None, trade_id = None, position_id = None):
         
         owner = owner or self.strategy_id
+        asset_class = asset_class or c.EQUITY
 
         position = Position(symbol = symbol, owner = owner, asset_class = asset_class, trade_id = trade_id, position_id = position_id)
         self.open_positions[position.position_id] = position
         return position
 
-    def create_order(self, symbol, quantity, position = None, order_details = {}):
+    def create_order(self, symbol, quantity, position = None, order_details = None):
+        """Creates an order with the provided symbol and quantity.
+            Other parameters are filled with defaults unless otherwise specified in order_details.
+
+        Args:
+            symbol (str): The symbol to create an order for.
+            quantity (numeric): The quantity of the order.
+            position (position.Position, optional): The position to associate this order with.
+                If None, 1) the first position with matching symbol and owner will be used.
+                If (1) is None, a new position will be created. Defaults to None.
+            order_details (dict, optional): Other order details. Defaults to None.
+
+        Returns:
+            event.order_event: A properly formatted order associated with a position.
+        """        
         '''Note that order does not impact strategy until it is actually placed'''
+
+        order_details = order_details or {}
+
+        _owner = order_details.get(c.STRATEGY_ID) or self.strategy_id
+        if _owner in self.children.values():
+            _owner = [k for k, v in self.children.items() if v == _owner][0]
+
         if position is None:
             # If there is a position with the symbol already, use the latest one of the positions with the same symbol
-            current_positions_in_symbol = [pos for pos in self.open_positions.values() if pos.symbol == symbol]
+            current_positions_in_symbol = [pos for pos in self.open_positions.values() if pos.symbol == symbol and pos.owner == _owner]
             if len(current_positions_in_symbol) > 0:
                 position = current_positions_in_symbol[-1]
             else:
                 # else create a new position
-                position = self.create_position(symbol = symbol)
+                position = self.create_position(symbol = symbol, owner = _owner)
         elif isinstance(position, dict):
             # If position details are supplied in a dict, create a new position with those details
             position = self.create_position(strategy = self, symbol = symbol, **position)
@@ -726,8 +853,13 @@ class Strategy(event_handler.EventHandler):
             pass
         else:
             raise Exception('position must be one of {None, dict, gzmo.core.event_handler.position.Position}')
-        
-        default_order_details = {
+
+        try:
+            default_price = self.get_mark(symbol)
+        except:
+            default_price = None
+
+        default_order = {
             c.STRATEGY_ID: self.strategy_id,
             c.TRADE_ID: position.trade_id,
             c.POSITION_ID: position.position_id,
@@ -737,52 +869,152 @@ class Strategy(event_handler.EventHandler):
             c.ORDER_TYPE: c.MARKET,
             c.QUANTITY: quantity,
             c.EVENT_TS: self.clock.timestamp(),
-            c.PRICE: self.get_mark(symbol) or 0.0,
+            c.PRICE: default_price,
             c.QUANTITY_OPEN: quantity
             }
         
-        order = {**default_order_details, **order_details}
-
+        # if the target is a child, this is a cashflow. Change a few default arguments
+        if symbol in self.children.keys() :
+            symbol = self.children[symbol]
+            default_order[c.SYMBOL] = symbol
+            order_details.pop(c.SYMBOL)
+        if symbol in self.children.values():
+            default_order[c.ASSET_CLASS] = c.STRATEGY
+            default_order[c.EVENT_SUBTYPE] = c.CASHFLOW
+            default_order[c.CREDIT] = -quantity if quantity < 0 else 0
+            default_order[c.DEBIT] = quantity if quantity > 0 else 0
+            default_order[c.QUANTITY_FILLED] = default_order.pop(c.QUANTITY_OPEN)
+        
+        order = {**default_order, **order_details}
+        
         return event.order_event(order)
 
-    def place_order(self, order):
-        '''
-        Place an order to the parent,
-        or in the case there is no parent,
-        place the order to the broker.
-        Assumes that any RMS action has already been performed.
+    def internalize_order(self, order):
+        """ Returns a copy of the order for internal processing.
+            Any child strategy_ids will be converted to the symbol under which
+            the child is tracked.
 
-        If it is not a pass through order (from children), the order must contain position_id.
-        '''
-        pass_through = (str(order[c.STRATEGY_ID]) != str(self.strategy_id))
+        Args:
+            order (event.order_event): order to internalize.
+        """
         
+        _order = copy.deepcopy(order)
+        if (symbol := _order.get(c.SYMBOL)) in self.children.values():
+            _order[c.SYMBOL] = [k for k, v in self.children.items() if v == symbol][0]
 
-        if not pass_through:
-            assert (position_id := order.get(c.POSITION_ID)) is not None, 'Order must belong to a position.'
-            # Update the position with the order
-            self.open_positions[position_id]._handle_order(order)
-            # update cash
+        # same for owner
+        if (owner := _order.get(c.STRATEGY_ID)) in self.children.values():
+            _order[c.STRATEGY_ID] = [k for k, v in self.children.items() if v == owner][0]
+        
+        return _order
+
+    def externalize_order(self, order):
+        """ Returns a copy of the order for external processing.
+            Any child symbols will be converted to the child's actual strategy_id.
+
+        Args:
+            order (event.order_event): order to externalize.
+        """
+        
+        order = copy.deepcopy(order)
+        if (symbol := order.get(c.SYMBOL)) in self.children.keys():
+            order[c.SYMBOL] = self.children[symbol]
+
+        # same for owner
+        if (owner := order.get(c.STRATEGY_ID)) in self.children.keys():
+            order[c.STRATEGY_ID] = self.children[owner]
+        
+        return order
+    
+    def positions_handle_order(self, order):
+        """Have the strategy's positions handle an internalized order.
+
+        Args:
+            order (event.order_event): order to process.
+        """
+        _order = self.internalize_order(order)
+        _owner = _order[c.STRATEGY_ID]
+        _symbol = _order[c.SYMBOL]
+        _cash_for_self = (_symbol == self.strategy_id)
+        _cash_for_child = (_symbol in self.children.keys())
+
+        if _cash_for_self:
+            # a cash flow event from parent
             self.cash._handle_event(order)
+            return
+
+        # a "regular" order. Update the corresponding symbol's position and cash position
+        # find a corresponding position; otherwise create one
+        if _order[c.STRATEGY_ID] == self.strategy_id:
+            position = self.open_positions[_order[c.POSITION_ID]]
         else:
-            # update tracked children position
-            matching_positions = [position for position in self.open_positions.values() if (position.owner == order[c.STRATEGY_ID]) and (position.symbol == order[c.SYMBOL])]
+            matching_positions = [position for position in self.open_positions.values() if (position.owner == _owner) and (position.symbol == _symbol)]
             if len(matching_positions) == 0:
-                position = self.create_position(symbol = order[c.SYMBOL], owner = order[c.STRATEGY_ID], asset_class = order[c.ASSET_CLASS])
+                raise Exception(f'No position for {_symbol} by {_owner} found')
             else:
                 position = matching_positions[0]
-            position._handle_event(order)
-        
-        # add self to chain
-        if (strategy_chain := order.get(c.STRATEGY_CHAIN)) is None:
-            order.update({c.STRATEGY_CHAIN: [self.strategy_id]})
+        # have the corresponding position handle the order
+        position._handle_event(_order)
+
+        # also find a corresponding cash position
+        matching_cash_positions = [position for position in self.open_positions.values() if (position.owner == _owner) and (position.asset_class == c.CASH)]
+        if len(matching_cash_positions) == 0:
+            raise Exception(f'No cash position of {_owner} found')
         else:
-            order[c.STRATEGY_CHAIN].append(self.strategy_id)
+            matching_cash_position = matching_cash_positions[0]
+        # handle the order
+        matching_cash_position._handle_event(_order)
+
+        # If this is cash for the child, also update the child's cash position
+        if _cash_for_child:
+            # a cash flow event to a child
+            # get receiver cash position
+            receiver_cash_positions = [position for position in self.open_positions.values() if (position.owner == _symbol) and (position.asset_class == c.CASH)]
+            if len(receiver_cash_positions) == 0:
+                raise Exception(f'No cash position of {_symbol} found')
+            else:
+                receiver_cash_position = receiver_cash_positions[0]
+            # handle the order
+            receiver_cash_position._handle_event(_order)
         
-        # place the order
-        if self.parent is None:
-            self.order_socket.send(utils.packb(order))
+        return True
+
+
+
+    def place_order(self, order = None, symbol = None, quantity = None):
+        """Places an order to a child, a parent, or the broker.
+            Either order has to be specified as a dictionary, or symbol and quantity must be provided.
+
+        Args:
+            order (dict, optional): The order to place. Defaults to None.
+            symbol (str, optional): The symbol of the order. Defaults to None.
+            quantity (str, optional): The quantity to order. Defaults to None.
+        """
+        # CREATE THE ORDER
+        assert not ((order is None) and ((symbol is None) or (quantity is None))), \
+            'Either order has to be specified as a dictionary, or symbol and quantity must be provided.'
+
+        # pad order with default args: This is to create a properly formatted order, and create a position if none exists yet.
+        # Note that create_order automatically converts any child symbols to child strategy_ids
+        order = order or {}
+        symbol = symbol or order.get(c.SYMBOL)
+        quantity = quantity or order.get(c.QUANTITY)
+        order = self.create_order(symbol = symbol, quantity = quantity, order_details = order)
+        order = self.externalize_order(order)
+
+        self.positions_handle_order(order)
+
+        # PLACE THE ORDER
+        if order[c.SYMBOL] in self.children.values():
+            order = self.format_strategy_chain(order, c.DOWN)
+            self.to_child(order[c.SYMBOL], order)
         else:
-            self.to_parent(order)
+            order = self.format_strategy_chain(order, c.UP)
+            # send it "up"
+            if self.parent is None:
+                self.order_socket.send(utils.packb(order))
+            else:
+                self.to_parent(order)
         
         return
     
@@ -792,39 +1024,40 @@ class Strategy(event_handler.EventHandler):
         Send the denial to the child.
         '''
         order = order.update(event_subtype = c.DENIED)
+        order = self.format_strategy_chain(event, c.DOWN)
         self.to_child(order[c.STRATEGY_CHAIN].pop(), order)
 
-    def liquidate(self, id_or_symbol = None, order_details = {c.ORDER_TYPE: c.MARKET}):
-        """Liquidate a trade, position, or positions on the specified symbol.
+    # def liquidate(self, id_or_symbol = None, order_details = {c.ORDER_TYPE: c.MARKET}):
+    #     """Liquidate a trade, position, or positions on the specified symbol.
 
-        Args:
-            id_or_symbol (str): trade_id, position_id, or symbol to liquidate.
-                If None, liquidate all positions. Default None.
+    #     Args:
+    #         id_or_symbol (str): trade_id, position_id, or symbol to liquidate.
+    #             If None, liquidate all positions. Default None.
 
-        Raises:
-            Exception: No trade/position/child strategy found to liquidate
+    #     Raises:
+    #         Exception: No trade/position/child strategy found to liquidate
 
-        Returns:
-            True: order submitted
-        """
-        # If the trade/position is already closed, let the user know
-        if id_or_symbol in self.closed_trades.keys():
-            raise Exception('Trade already closed.')
-        elif (id_or_symbol in self.closed_positions):
-            raise Exception('Posititon already closed.')
-        # If this is a child strategy, send them the note
-        elif id_or_symbol in self.children.keys():
-            self.to_child(id_or_symbol, c.LIQUIDATE)
-        elif (id_or_symbol in [position.symbol for position in self.open_positions.values()]):
-            for position in self.open_positions.values():
-                if position.symbol == id_or_symbol:
-                    closing_order = {c.QUANTITY: -position.quantity_open}
-                    self.place_order(self.create_order(order_details = closing_order, position = position))
-            for order in self.pending_orders.values():
-                if order.get(c.SYMBOL) == id_or_symbol:
-                    self.place_order(order.update({c.ORDER_TYPE: c.CANCELLATION}))
-        else:
-            raise Exception('No trade/position/child strategy found to liquidate.')
+    #     Returns:
+    #         True: order submitted
+    #     """
+    #     # If the trade/position is already closed, let the user know
+    #     if id_or_symbol in self.closed_trades.keys():
+    #         raise Exception('Trade already closed.')
+    #     elif (id_or_symbol in self.closed_positions):
+    #         raise Exception('Posititon already closed.')
+    #     # If this is a child strategy, send them the note
+    #     elif id_or_symbol in self.children.keys():
+    #         self.to_child(id_or_symbol, c.LIQUIDATE)
+    #     elif (id_or_symbol in [position.symbol for position in self.open_positions.values()]):
+    #         for position in self.open_positions.values():
+    #             if position.symbol == id_or_symbol:
+    #                 closing_order = {c.QUANTITY: -position.quantity_open}
+    #                 self.place_order(self.create_order(order_details = closing_order, position = position))
+    #         for order in self.pending_orders.values():
+    #             if order.get(c.SYMBOL) == id_or_symbol:
+    #                 self.place_order(order.update({c.ORDER_TYPE: c.CANCELLATION}))
+    #     else:
+    #         raise Exception('No trade/position/child strategy found to liquidate.')
 
 
 

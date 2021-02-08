@@ -21,6 +21,7 @@ REQUESTED = 'REQUESTED'         # an order request is created for approval
 DENIED = 'DENIED'               # an order request is denied
 SUBMITTED = 'SUBMITTED'         # order is successfully submitted to the broker
 FAILED = 'FAILED'    # Order is submitted to the broker but no RECEIVED message was received
+CASHFLOW = 'CASHFLOW'
 
 # from broker
 RECEIVED = 'RECEIVED'           # order is received by the broker
@@ -65,6 +66,11 @@ REQUEST = 'REQUEST'
 # COMMUNICATIONS to be handled
 MESSAGE = 'MESSAGE'
 KWARGS = 'KWARGS'
+# TOPIC = 'TOPIC'
+
+# Event directions
+UP = 'UP'
+DOWN = 'DOWN'
 
 # datalines
 # OPEN = 'OPEN'
@@ -159,18 +165,18 @@ BROKER = 'BROKER'
 # incremental
 CREDIT = 'CREDIT'
 DEBIT = 'DEBIT'
-NET = 'NET'
+# NET = 'NET'
 COMMISSION = 'COMMISSION'
 QUANTITY_FILLED = 'QUANTITY_FILLED'
 AVERAGE_PRICE = 'AVERAGE_PRICE'
 # cumulative
-CREDIT_TOTAL = 'CREDIT_TOTAL'
-DEBIT_TOTAL = 'DEBIT_TOTAL'
-NET_TOTAL = 'NET_TOTAL'
-COMMISSION_TOTAL = 'COMMISSION_TOTAL'
-QUANTITY_OPEN = 'QUANTITY_OPEN'
-QUANTITY_FILLED_TOTAL = 'QUANTITY_FILLED_TOTAL'
-AVERAGE_PRICE_TOTAL = 'AVERAGE_PRICE_TOTAL'
+# CREDIT_TOTAL = 'CREDIT_TOTAL'
+# DEBIT_TOTAL = 'DEBIT_TOTAL'
+# NET_TOTAL = 'NET_TOTAL'
+# COMMISSION_TOTAL = 'COMMISSION_TOTAL'
+# QUANTITY_OPEN = 'QUANTITY_OPEN'
+# QUANTITY_FILLED_TOTAL = 'QUANTITY_FILLED_TOTAL'
+# AVERAGE_PRICE_TOTAL = 'AVERAGE_PRICE_TOTAL'
 
 # session socket modes
 ALL = 'ALL'

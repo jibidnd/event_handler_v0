@@ -335,6 +335,9 @@ class Session:
         return
 
     def start(self):
+        
+        for strategy in self.strategies.values():
+            strategy.start()
 
         if self.socket_mode == c.ALL:
         # tell datafeeds to start publishing
@@ -387,9 +390,7 @@ class Session:
             raise NotImplementedError('socket_mode = "ALL" is not implemented in process_events.')
         elif socket_mode not in [c.STRATEGIES_FULL, c.STRATEGIES_INTERNALONLY, c.NONE]:
             raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
-
         while not self.main_shutdown_flag.is_set():
-            
             # STEP 1: BROKER HANDLE ORDERS
             # -----------------------------------------------------------------------------------------------------
             # try to get (all) orders from strategies
@@ -407,7 +408,7 @@ class Session:
                         if (response := broker.take_order(order_unpacked)) is not None:
                             # prepare the response
                             response_packed = utils.packb(response)
-                            original_sender = response[c.STRATEGY_CHAIN].pop()
+                            original_sender = response[c.STRATEGY_CHAIN][-1]
                             original_sender_encoded = original_sender.encode('utf-8')
                             # send the response
                             msg = self.broker_strategy_socket.send_multipart([original_sender_encoded, response_packed], copy = False, track = True)
@@ -433,7 +434,7 @@ class Session:
                         # have broker handle the order
                         if (response := broker.take_order(order)) is not None:
                             # have the strategy handle the response
-                            original_sender = response[c.STRATEGY_CHAIN].pop()
+                            original_sender = response[c.STRATEGY_CHAIN][-1]
                             self.strategies[original_sender]._handle_event(response)
                     
                     except IndexError:
@@ -449,7 +450,7 @@ class Session:
             if (next_data := self.synced_datafeed.fetch(1)) is None:
                 # if no more data, we're done.
                 self.main_shutdown_flag.set()
-
+                
 
             # STEP 3: BROKERS HANDLE DATA
             # -----------------------------------------------------------------------------------------------------
@@ -462,13 +463,13 @@ class Session:
                             if socket_mode == c.STRATEGIES_FULL:
                                 # prepare the response
                                 response_packed = utils.packb(fill)
-                                original_sender = fill[c.STRATEGY_CHAIN].pop()
+                                original_sender = fill[c.STRATEGY_CHAIN][-1]
                                 original_sender_encoded = original_sender.encode('utf-8')
                                 msg = self.broker_strategy_socket.send_multipart([original_sender_encoded, response_packed], copy = False, track = True)
                                 msg.wait()
                             # otherwise directly have the strategy handle the event
                             else:
-                                self.strategies[fill[c.STRATEGY_CHAIN].pop()]._handle_event(fill)
+                                self.strategies[fill[c.STRATEGY_CHAIN][-1]]._handle_event(fill)
 
             # STEP 4: STRATEGIES HANDLE DATA
             # -----------------------------------------------------------------------------------------------------
@@ -620,7 +621,7 @@ def broker_proxy(address_frontend, address_backend, capture = None, context = No
                 # received order from broker: (broker ident, (strategy ident, order))
                 broker_encoded, order_packed = backend.recv_multipart()
                 order_unpacked = unpackb(order_packed)
-                send_to = order_unpacked[c.STRATEGY_CHAIN].pop()
+                send_to = order_unpacked[c.STRATEGY_CHAIN][-1]
                 frontend.send_multipart([send_to.encode('utf-8'), utils.packb(order_unpacked)])
         except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
             frontend.close(linger = 10)
@@ -713,7 +714,7 @@ class SocketEmulator:
 
     def send(self, item):
         self.deq.append(utils.unpackb(item))
-    
+
     def send_multipart(self, items):
         item = items[1]
         self.deq.append(utils.unpackb(item))
