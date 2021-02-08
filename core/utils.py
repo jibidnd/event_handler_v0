@@ -222,11 +222,12 @@ def default_pre_packer(obj):
             warnings.warn('Naive datetime object passed. Assuming system local timezone.')
         processed = msgpack.ExtType(5, msgpack.packb((obj.isoformat(), obj.tzinfo), default = str))
     else:
-        try:
-            obj = decimal.Decimal(obj)
+        if isinstance(obj, decimal.Decimal):
             processed = msgpack.ExtType(10, str(obj).encode('utf-8'))
-        except:
-            processed = str(obj)    
+        # elif (s := str(obj)).isnumeric():
+        #     processed = obj
+        else:
+            processed = obj
     return processed
 
 def packb(obj):
