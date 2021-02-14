@@ -495,33 +495,33 @@ class Strategy(event_handler.EventHandler):
     # ----------------------------------------------------------------------------------------------------
     # Info things
     # ----------------------------------------------------------------------------------------------------
-    def get(self, identifier):
+    def get(self, identifier, obj_type = None):
         """ `get`s an object from the strategy by the identifier.
             The identifier could be a property/method name, a symbol with a corresponding lines object,
-            a position, or a trade.
+            or a position with
             If an id is provided, the method will look in the following order: 
                 self.open_trades, self.open_positions, self.closed_trades, self.closed_positions
 
         Args:
             identifier (str): The name of the object or an identifier of the object.
         """
+        obj_type = (obj_type or '').upper()
 
-        # Try getting it from datas
-        # First try exact match
-        if identifier in self.datas.keys():
+        if (obj_type == c.DATA) or (obj_type == ''):
             return self.datas[identifier]
-        # Otherwise see if there are lines with names specified with resolution
-        elif (keys := [key for key in self.datas.keys() if identifier in key]) !=  []:
-            # return last added
-            return self.datas[keys[-1]]
-        # Next, try to get from trades and positions
-        elif (trade_or_position := self.open_trades.get(identifier) \
-                                    or self.open_positions.get(identifier) \
-                                    or self.closed_trades.get(identifier) \
-                                    or self.closed_positions.get(identifier)) is not None:
-            return trade_or_position
+        elif (obj_type == c.POSITION) or (obj_type == ''):
+            if (position := (self.open_positions.get(identifier) or self.closed_positions.get(identifier))) is not None:
+                return position
+            else:
+                # try to get positions with matching symbols
+                positions = [pos for pos in self.open_positions.values() if pos.symbol == identifier] + \
+                            [pos for pos in self.closed_positions.values() if pos.symbol == identifier] + \
+                            [pos for pos in self.open_positions.values() if pos.owner == identifier] + \
+                            [pos for pos in self.closed_positions.values() if pos.owner == identifier]
+                if len(positions) > 0:
+                    return positions
         # Otherwise see if there is a property/method with name identifier.
-        else:
+        elif (obj_type in ['PROPERTY', 'METHOD']) or (obj_type == ''):
             try:
                 answer = getattr(self, identifier)
             except AttributeError:
