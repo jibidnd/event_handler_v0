@@ -288,14 +288,14 @@ def immediate_fill(order, data, fill_strategy = c.CLOSE, commission = 0.0):
             Defaults to c.CLOSE.
     """    
     # time.sleep(0.1)
-    assert order.get(c.QUANTITY_OPEN) > 0, 'Nothing to fill.'
+    assert order.get(c.QUANTITY_OPEN) != 0, 'Nothing to fill.'
     # calculate fill price
     p = None
     if order[c.ORDER_TYPE] == c.MARKET:
         if data[c.EVENT_SUBTYPE] == c.BAR:
             p = data[fill_strategy]
         elif data[c.EVENT_SUBTYPE] == c.TICK:
-            p = data[c.PRICE]
+            p = data[fill_strategy]
         elif data[c.EVENT_SUBTYPE] == c.QUOTE:
             p = data[fill_strategy]
     elif order[c.ORDER_TYPE] == c.LIMIT:
@@ -307,13 +307,13 @@ def immediate_fill(order, data, fill_strategy = c.CLOSE, commission = 0.0):
                     ((order[c.QUANTITY] < 0) and (order[c.PRICE >= data[c.LOW]])):
                     p = order[c.PRICE]
         elif data[c.EVENT_SUBTYPE] == c.TICK:
-                if ((order[c.QUANTITY] > 0) and (order[c.PRICE] <= data[c.PRICE])) or \
-                    ((order[c.QUANTITY] < 0) and (order[c.PRICE >= data[c.PRICE]])):
-                    p = data[c.PRICE]
+                if ((order[c.QUANTITY] > 0) and (order[c.PRICE] <= data[fill_strategy])) or \
+                    ((order[c.QUANTITY] < 0) and (order[c.PRICE >= data[fill_strategy]])):
+                    p = data[fill_strategy]
         elif data[c.EVENT_SUBTYPE] == c.QUOTE:
                 if ((order[c.QUANTITY] > 0) and (order[c.PRICE] >= data[c.ASK])) or \
                     ((order[c.QUANTITY] < 0) and (order[c.PRICE <= data[c.BID]])):
-                    p = data[c.PRICE]
+                    p = data[fill_strategy]
         else:
             raise NotImplementedError
     

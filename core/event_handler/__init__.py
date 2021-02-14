@@ -13,6 +13,9 @@ import collections
 import datetime
 import uuid
 
+# for converting lines to dataframes
+import pandas as pd
+
 from .. import constants as c
 
 
@@ -199,6 +202,93 @@ class event:
 
         return communication
 
+# class lines0(dict):
+#     """
+#     A lines object is a collection of time series (deques) belonging to one asset (symbol).
+    
+#     The lines object will keep track of fields from data events, as specified in the __init__
+#         method. `include_only` and `exclude` cannot be modified after initialization to keep
+#         all deques in sync.
+#     If `include_only` is None (default), the first data event will determine what
+#         fields are tracked.
+
+#     Args:
+#         data_type (str): The type of data (e.g. TICK, BAR, QUOTE, SIGNAL, STRATEGY). For reference only.
+#         symbol (str): An identifier for the underlying data. For reference only.
+#         include_only (None or set, optional): Only track these fields in a data event. 
+#             If None, track all fields of a given data event (if data has new fields, track those too).
+#             Cannot be modified after initialization. Defaults to None.
+#         exclude (None or set, optional): Do not track these fields in a data event.
+#             If include_only and exclude specify the same field, exclude takes precedence. 
+#             Cannot be modified after initialization. Defaults to None.
+        
+        
+#     """
+#     def __init__(self, symbol, data_type = None, include_only = None, exclude = set([c.EVENT_TYPE, c.SYMBOL, c.TOPIC]), maxlen = None, mark_line = 'CLOSE'):       
+        
+#         self.__initialized = False
+#         self.symbol = symbol
+#         self.data_type = data_type
+#         self.include_only = include_only
+#         self.exclude = exclude
+#         self.mark_line = mark_line
+
+#         # Keep a tab on what's tracked
+#         if include_only is not None:
+#             self._tracked = include_only - exclude
+#             for line in self._tracked:
+#                 self[line] = collections.deque(maxlen = maxlen)
+#         else:
+#             self._tracked = None
+        
+#         self.__initialized = True
+
+#     def update_with_data(self, data):
+#         # find out what should be tracked if we don't know yet  
+#         if self._tracked is None:
+#             if self.include_only is None:
+#                 self._tracked = set(data.keys()) - self.exclude
+#             else:
+#                 self._tracked = self.include_only - self.exclude
+            
+#             # Create a deque for each tracked field  
+#             self.update({line: collections.deque() for line in self._tracked})
+
+#         for line in self._tracked:
+#             self[line].append(data.get(line))
+
+#     @property
+#     def mark(self):
+#         return self.get(self.mark_line)
+    
+#     def __len__(self):
+#         if len(self.keys()) == 0:
+#             return 0
+#         else:
+#             return len(next(iter(self.values())))
+
+#     @property
+#     def include_only(self):
+#         return self._include_only
+    
+#     @include_only.setter
+#     def include_only(self, include_only):
+#         if (self.__initialized) and (len(self.keys()) > 0):
+#             raise Exception('Cannot modify attribute after initialization.')
+#         else:
+#             self._include_only = include_only
+
+#     @property
+#     def exclude(self):
+#         return self._exclude
+
+#     @exclude.setter
+#     def exclude(self, exclude):
+#         if self.__initialized:
+#             raise Exception('Cannot modify attribute after initialization.')
+#         else:
+#             self._exclude = exclude
+
 class lines(dict):
     """
     A lines object is a collection of time series (deques) belonging to one asset (symbol).
@@ -210,78 +300,63 @@ class lines(dict):
         fields are tracked.
 
     Args:
-        data_type (str): The type of data (e.g. TICK, BAR, QUOTE, SIGNAL, STRATEGY). For reference only.
         symbol (str): An identifier for the underlying data. For reference only.
-        include_only (None or set, optional): Only track these fields in a data event. 
-            If None, track all fields of a given data event (if data has new fields, track those too).
-            Cannot be modified after initialization. Defaults to None.
-        exclude (None or set, optional): Do not track these fields in a data event.
-            If include_only and exclude specify the same field, exclude takes precedence. 
-            Cannot be modified after initialization. Defaults to None.
-        
+        data_type (str): The type of data (e.g. TICK, BAR, QUOTE, SIGNAL, STRATEGY).
+        resolution (str): The resolution of data (e.g. D, h, m, s).
+        index_line (str): The line to use as index. Default 'EVENT_TS'.
+        mark_line (str): The line to use as mark. Default 'CLOSE'.
+        tracked (None or set, optional): Track these fields in a data event. Defaults to OHLCV.
+        maxlen (int, optional): The number of datapoints to keep. If None, keep all data. Default None.
         
     """
-    def __init__(self, symbol, data_type = None, include_only = None, exclude = set([c.EVENT_TYPE, c.SYMBOL, c.TOPIC]), maxlen = None, mark_line = 'CLOSE'):       
+    def __init__(self, symbol, data_type = c.BAR, resolution = 'm', index_line = c.EVENT_TS, mark_line = c.CLOSE, tracked = None, maxlen = None):       
         
-        self.__initialized = False
         self.symbol = symbol
         self.data_type = data_type
-        self.include_only = include_only
-        self.exclude = exclude
+        self.resolution = resolution
+        self.index_line = index_line
         self.mark_line = mark_line
+        self.tracked = tracked or [c.OPEN, c.HIGH, c.LOW, c.CLOSE, c.VOLUME]
 
-        # Keep a tab on what's tracked
-        if include_only is not None:
-            self._tracked = include_only - exclude
-            for line in self._tracked:
-                self[line] = collections.deque(maxlen = maxlen)
+        self.index = collections.deque(maxlen = maxlen)
+        for line in self.tracked:
+            self[line] = collections.deque(maxlen = maxlen)
+
+    def __getattr__(self, key):
+
+        if key in self.keys():
+            return self[key]
+        elif (matching_keys := [k for k in self.keys() if k.lower() == key.lower()]) != []:
+            # 3 times slower, try to avoid this
+            _key = matching_keys[0]
+            return self[_key]
         else:
-            self._tracked = None
-        
-        self.__initialized = True
-
-    def update_with_data(self, data):
-        # find out what should be tracked if we don't know yet  
-        if self._tracked is None:
-            if self.include_only is None:
-                self._tracked = set(data.keys()) - self.exclude
-            else:
-                self._tracked = self.include_only - self.exclude
-            
-            # Create a deque for each tracked field  
-            self.update({line: collections.deque() for line in self._tracked})
-
-        for line in self._tracked:
-            self[line].append(data.get(line))
+            raise KeyError(key)
 
     @property
     def mark(self):
-        return self.get(self.mark_line)
+        return self[self.mark_line]
     
     def __len__(self):
         if len(self.keys()) == 0:
             return 0
         else:
-            return len(next(iter(self.values())))
+            return len(self.index)
 
-    @property
-    def include_only(self):
-        return self._include_only
+    def update_with_data(self, data):
+
+        self.index.append(data.get(self.index_line))
+        for line in self.tracked:
+            self[line].append(data.get(line))
     
-    @include_only.setter
-    def include_only(self, include_only):
-        if (self.__initialized) and (len(self.keys()) > 0):
-            raise Exception('Cannot modify attribute after initialization.')
-        else:
-            self._include_only = include_only
+    def as_pandas_df(self, columns = None):
+        columns = columns or self.keys()
+        df = pd.DataFrame(data = {k: v for k, v in self.items() if k in columns}, index = self.index)
+        df.index.name = self.index_line
+        return df
 
-    @property
-    def exclude(self):
-        return self._exclude
-
-    @exclude.setter
-    def exclude(self, exclude):
-        if self.__initialized:
-            raise Exception('Cannot modify attribute after initialization.')
-        else:
-            self._exclude = exclude
+    def as_pandas_series(self, column = None):
+        column = column or self.mark_line
+        s = pd.Series(self[column], index = self.index)
+        s.index.name = self.index_line
+        return s

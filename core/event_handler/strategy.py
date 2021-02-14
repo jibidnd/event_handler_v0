@@ -76,7 +76,7 @@ class Strategy(event_handler.EventHandler):
         if self.logging_addresses is not None:
             for logging_address in logging_addresses:
                 self.connect_logging_socket(logging_address)
-
+        
     def __str__(self):
 
         keys = ['name', 'params', 'parent', 'strategy_id', 'children', 'shares']
@@ -420,7 +420,9 @@ class Strategy(event_handler.EventHandler):
             - The strategy chain of the order has reached length 0
             - The cash of the strategy is updated accordingly
             - The corrsponding position is updated
-            
+
+        This will be called 3*(#levels - 1) for each order, once for each of request, submitted, and filled.
+        We should probably make this faster.
         '''
         event_subtype = order.get(c.EVENT_SUBTYPE)
 
@@ -437,8 +439,6 @@ class Strategy(event_handler.EventHandler):
                 return
         # order on the way going "down"
         else:
-            print(self.strategy_id)
-            print(order)
             # update positions
             self.positions_handle_order(order)
             # pass it down if this strategy is not the final destination
@@ -446,7 +446,6 @@ class Strategy(event_handler.EventHandler):
             if len(order[c.STRATEGY_CHAIN]) != 0:
                 original_sender = order[c.STRATEGY_CHAIN].pop()
                 self.to_child(original_sender, order)
-        
         return self.handle_order(order)
         
     def _handle_communication(self, communication):
@@ -472,10 +471,6 @@ class Strategy(event_handler.EventHandler):
             # current open positions
             if communication[c.TOPIC] == 'openpositionsummary':
                 self.load_openpositions(info)
-            # if next(iter(info.keys())) == c.MARK:
-            #     # messages are signed with strategy_id; need to find the symbol tracked in this strategy
-            #     symbol = next(key for key, value in self.children.items() if value == communication[c.SYMBOL])
-            #     self.datas[symbol].update_with_data(info)
         else:
             pass
 
@@ -540,13 +535,13 @@ class Strategy(event_handler.EventHandler):
     
     def get_nav(self, identifier = None):
         # Get net asset value of a strategy / asset
-
         nav = 0
         if identifier is None:
             for position in self.open_positions.values():
                 if position.asset_class != c.STRATEGY:
                     if position.quantity_open != 0:
                         nav += self.get_mark(position.symbol) * position.quantity_open
+            
         else:
             for position in self.open_positions.values():
                 if (position.owner == identifier) or ((position.symbol == identifier) and (position.asset_class != c.STRATEGY)): # ??
@@ -579,16 +574,14 @@ class Strategy(event_handler.EventHandler):
         Returns:
             decimal.Decimal: The last known value of the asset
         """
-
         if identifier in self.children.keys():
             identifier = self.children[identifier]
-
         # If this is something whose value we already track
         if (data := self.datas.get(identifier)) is not None:
             return data.mark[-1]
         elif identifier == c.CASH:
             return decimal.Decimal(1.00)
-        elif identifier in self.children.values():
+        else:
             # Get NAV
             nav = self.get_nav(identifier)
             # Get number of shares
@@ -608,8 +601,6 @@ class Strategy(event_handler.EventHandler):
             mark = nav / shares
 
             return mark
-        else:
-            raise Exception(f'Unable to get mark for {identifier}')
 
 
     def get_totalpnl(self, identifier = None):
@@ -788,16 +779,11 @@ class Strategy(event_handler.EventHandler):
         """
         if c.STRATEGY_CHAIN not in event.keys():
             event[c.STRATEGY_CHAIN] = []
-        try:
+        if len(event[c.STRATEGY_CHAIN]) > 0:
             # make it so that the last item is not self
             last = event[c.STRATEGY_CHAIN].pop()
             if last != self.strategy_id:
                 event[c.STRATEGY_CHAIN].append(last)
-        except IndexError:
-            pass
-        except:
-            raise
-
         if direction == c.UP:
             event[c.STRATEGY_CHAIN].append(self.strategy_id)
         
@@ -833,11 +819,11 @@ class Strategy(event_handler.EventHandler):
         '''Note that order does not impact strategy until it is actually placed'''
 
         order_details = order_details or {}
-
+        
         _owner = order_details.get(c.STRATEGY_ID) or self.strategy_id
         if _owner in self.children.values():
             _owner = [k for k, v in self.children.items() if v == _owner][0]
-
+        
         if position is None:
             # If there is a position with the symbol already, use the latest one of the positions with the same symbol
             current_positions_in_symbol = [pos for pos in self.open_positions.values() if pos.symbol == symbol and pos.owner == _owner]
@@ -853,12 +839,13 @@ class Strategy(event_handler.EventHandler):
             pass
         else:
             raise Exception('position must be one of {None, dict, gzmo.core.event_handler.position.Position}')
+        
 
-        try:
+        if symbol in self.datas:
             default_price = self.get_mark(symbol)
-        except:
+        else:
             default_price = None
-
+        
         default_order = {
             c.STRATEGY_ID: self.strategy_id,
             c.TRADE_ID: position.trade_id,
@@ -884,7 +871,7 @@ class Strategy(event_handler.EventHandler):
             default_order[c.CREDIT] = -quantity if quantity < 0 else 0
             default_order[c.DEBIT] = quantity if quantity > 0 else 0
             default_order[c.QUANTITY_FILLED] = default_order.pop(c.QUANTITY_OPEN)
-        
+
         order = {**default_order, **order_details}
         
         return event.order_event(order)
@@ -939,8 +926,17 @@ class Strategy(event_handler.EventHandler):
         _cash_for_child = (_symbol in self.children.keys())
 
         if _cash_for_self:
-            # a cash flow event from parent
+            # NAV before adding cash
+            nav_0 = self.get_nav()
+            # handle the cash flow
             self.cash._handle_event(order)
+            # negate the net amount to sender to get net amount to self
+            amount = -(order[c.CREDIT] - order[c.DEBIT])
+            # dilute shares so that the mark of the position is not changed by adding cash
+            if self.shares is None:
+                self.shares = self.cash.investment
+            else:
+                self.shares = self.shares * (self.get_nav() + amount) / nav_0
             return
 
         # a "regular" order. Update the corresponding symbol's position and cash position
@@ -1001,9 +997,7 @@ class Strategy(event_handler.EventHandler):
         quantity = quantity or order.get(c.QUANTITY)
         order = self.create_order(symbol = symbol, quantity = quantity, order_details = order)
         order = self.externalize_order(order)
-
         self.positions_handle_order(order)
-
         # PLACE THE ORDER
         if order[c.SYMBOL] in self.children.values():
             order = self.format_strategy_chain(order, c.DOWN)
@@ -1015,7 +1009,6 @@ class Strategy(event_handler.EventHandler):
                 self.order_socket.send(utils.packb(order))
             else:
                 self.to_parent(order)
-        
         return
     
     def deny_order(self, order):

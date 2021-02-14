@@ -348,6 +348,23 @@ class Session:
                 datafeed_thread.join()
         
         elif self.socket_mode in [c.STRATEGIES_FULL, c.STRATEGIES_INTERNALONLY, c.NONE]:
+
+            # handle any communication event before start
+            # e.g. passing cash, etc
+            while True:
+                try:
+                    communication_event = self.communication_deque.popleft()
+                    try:
+                        receiver = communication_event[c.RECEIVER_ID]
+                    except KeyError:
+                        raise Exception('No receiver specified for communication event\n', communication_event)
+                    self.strategies[receiver]._handle_event(communication_event)
+                except IndexError:
+                    # nothing else to handle
+                    break
+                except:
+                    raise
+            
             self.process_events(self.socket_mode)
         else:
             raise NotImplementedError(f'socket_mode {self.socket_mode} not implemented')
@@ -384,12 +401,12 @@ class Session:
                 - send data
                 - broker handle data; send any response
         '''
-
         # check socket type
         if socket_mode == c.ALL:
             raise NotImplementedError('socket_mode = "ALL" is not implemented in process_events.')
         elif socket_mode not in [c.STRATEGIES_FULL, c.STRATEGIES_INTERNALONLY, c.NONE]:
             raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
+
         while not self.main_shutdown_flag.is_set():
             # STEP 1: BROKER HANDLE ORDERS
             # -----------------------------------------------------------------------------------------------------
@@ -451,7 +468,6 @@ class Session:
                 # if no more data, we're done.
                 self.main_shutdown_flag.set()
                 
-
             # STEP 3: BROKERS HANDLE DATA
             # -----------------------------------------------------------------------------------------------------
             # Brokers will use new data to fill any outstanding orders / update states
@@ -485,11 +501,11 @@ class Session:
                     for strategy_id, strategy in self.strategies.items():
                         if next_data[c.TOPIC] in strategy.data_subscriptions:
                             strategy._handle_event(next_data)
-
             # STEP 5: RESOLVE COMMUNICATION
             # -----------------------------------------------------------------------------------------------------
             # Send communication to each strategy. Any further communication will be added to self.communication_deque,
             #   and we will handle this in an infinite loop until there is no more communication (responses)
+            # t0 = time.time()
             while True:
                 try:
                     communication_event = self.communication_deque.popleft()
@@ -506,6 +522,7 @@ class Session:
 
         # Done processing all data events; close things
         self.shutdown()
+        
 
 
 def pub_sub_proxy(address_in, address_out, capture = None, context = None, shutdown_flag = None):

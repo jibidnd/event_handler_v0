@@ -150,7 +150,7 @@ class CashPosition(Position):
     def __init__(self, owner, low_bal = 100):
         super().__init__(symbol = c.CASH, owner = owner, asset_class = c.CASH)
         self.investment = 0
-        self.low_bal = 100
+        self.low_bal = low_bal
 
 
     def _handle_order(self, order):
@@ -190,18 +190,18 @@ class CashPosition(Position):
             self.credit += credit
             self.debit += debit
             
-            return
+            return self.handle_order(order)
         
         # otherwise handle the order's impact to the cash account
         else:
-            # make sure there is enough money
-            available = self.quantity_open + self.quantity_pending
-            if available + pending_amount < self.low_bal:
-                raise Exception(f'Attempting an order for  {pending_amount} but only {available} available.')
 
             # handle the order based on subtype
             if event_subtype == c.REQUESTED:
-                # Order has been sent for approval
+                # make sure there is enough money
+                available = self.quantity_open + self.quantity_pending
+                if available + pending_amount < self.low_bal:
+                    raise Exception(f'Attempting an order for  {pending_amount} but only {available} available.')
+                # Order is being sent for approval
                 # Treat orders as submitted
                 self.quantity_pending += pending_amount    # approx fill price
             elif event_subtype == c.SUBMITTED:
@@ -224,7 +224,7 @@ class CashPosition(Position):
             elif event_subtype in [c.FAILED, c.EXPIRED, c.CANCELLED, c.REJECTED]:
                 self.quantity_pending -= pending_amount    # prior approx fill price
 
-            return
+            return self.handle_order(order)
         
     @property
     def total_pnl(self):
