@@ -12,6 +12,8 @@ import abc
 import collections
 import datetime
 import uuid
+import bisect
+import itertools
 
 # for converting lines to dataframes
 import pandas as pd
@@ -317,6 +319,7 @@ class lines(dict):
         self.index_line = index_line
         self.mark_line = mark_line
         self.tracked = tracked or [c.OPEN, c.HIGH, c.LOW, c.CLOSE, c.VOLUME]
+        self.maxlen = maxlen
 
         self.index = collections.deque(maxlen = maxlen)
         for line in self.tracked:
@@ -344,10 +347,66 @@ class lines(dict):
             return len(self.index)
 
     def update_with_data(self, data):
+        if (data_idx := data.get(self.index_line)) is None:
+            pass
+        elif (len(self.index) == 0) or (data_idx >= self.index[-1]):
+            self.index.append(data.get(self.index_line))
+            for line in self.tracked:
+                self[line].append(data.get(line))
+        else:
+            # much slower, try to avoid intermediate inserts.
+            if len(self.index) > self.maxlen:
+                self.index.popleft()
+                for line in self.tracked:
+                    line.popleft()
+            insert_position = bisect.bisect_right(self.index, data_idx)
+            self.index.insert(insert_position, data_idx)
+            for line in self.tracked:
+                self[line].insert(data.get(line))
+        return
 
-        self.index.append(data.get(self.index_line))
+    def get_slice(self, beg = None, end = None, as_df = False):
+        if beg is None:
+            beg_position = 0
+        else:
+            beg_position = bisect.bisect_left(self.index, beg)
+        if end is None:
+            end_position = len(self.index)
+        else:
+            end_position = bisect.bisect_right(self.index, end)
+        
+        partial_copy = {}
+        partial_copy[self.index_line] = list(itertools.islice(self.index, beg_position, end_position))
         for line in self.tracked:
-            self[line].append(data.get(line))
+            partial_copy[line] = list(itertools.islice(self[line], beg_position, end_position))
+        
+        if as_df:
+            partial_copy = pd.DataFrame(partial_copy)
+        
+        return partial_copy
+    
+    def filter(self, func, as_df = False):
+        # create the mask
+        if callable(func):
+            mask = list(map(func, self.index))
+        elif isinstance(func, dict):
+            masks = []
+            for k, f in func.items():
+                masks.append(map(f, self[k]))
+            mask = [all(m) for m in zip(*masks)]
+        else:
+            raise NotImplementedError('func must be either a callable to be applied onto the index, or a dict of callables.')
+
+        # apply compress to data
+        filtered_copy = {}
+        filtered_copy[self.index_line] = list(itertools.compress(self.index, mask))
+        for line in self.tracked:
+            filtered_copy[line] = list(itertools.compress(self[line], mask))
+
+        if as_df:
+            filtered_copy = pd.DataFrame(filtered_copy).set_index(self.index_line)
+
+        return filtered_copy
     
     def as_pandas_df(self, columns = None):
         columns = columns or self.keys()
