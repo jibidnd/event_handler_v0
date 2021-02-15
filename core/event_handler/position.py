@@ -47,12 +47,13 @@ class Position(event_handler.EventHandler):
         self.position_id = position_id or str(uuid.uuid1())
         self.status = None
         self.risk = None
-        self.quantity_open = 0
-        self.quantity_pending = 0
-        self.commission = 0
-        self.credit = decimal.Decimal(0.0) # net increases to cash (filled orders)
-        self.debit = decimal.Decimal(0.0)  # net decreases to cash (filled orders)
+        self.quantity_open = decimal.Decimal('0.0')
+        self.quantity_pending = decimal.Decimal('0.0')
+        self.commission = decimal.Decimal('0.0')
+        self.credit = decimal.Decimal('0.0') # net increases to cash (filled orders)
+        self.debit = decimal.Decimal('0.0')  # net decreases to cash (filled orders)
         self.transactions = collections.deque(maxlen = None)
+        self.quantity_history = (collections.deque(), collections.deque())
     
     def __str__(self):
 
@@ -74,6 +75,13 @@ class Position(event_handler.EventHandler):
         #     f'Order {order.get(c.ORDER_ID)} belongs to owner {order.get(c.STRATEGY_ID)}, not {self.owner}'
         assert order.get(c.SYMBOL) == self.symbol,\
             f'Order {order.get(c.ORDER_ID)} has symbol {order.get(c.SYMBOL)}, not {self.symbol}'
+        
+        for k in [c.QUANTITY, c.QUANTITY_FILLED, c.QUANTITY_OPEN, c.CREDIT, c.DEBIT, c.COMMISSION]:
+            if k in order.keys():
+                try:
+                    order[k] = decimal.Decimal(order[k])
+                except TypeError as e:
+                    pass
 
         # log the transaction
         self.transactions.append(order)
@@ -103,23 +111,26 @@ class Position(event_handler.EventHandler):
             self.commission += order[c.COMMISSION]
             # update pending quantity
             self.quantity_pending -= order[c.QUANTITY]
+            # update quantity history
+            self.quantity_history[0].append(order[c.EVENT_TS])
+            self.quantity_history[1].append(self.quantity_open)
         elif event_subtype in [c.FAILED, c.EXPIRED, c.CANCELLED, c.REJECTED]:
             self.quantity_pending -= order[c.QUANTITY]
-        elif event_subtype in [c.CASHFLOW]:
-            # Update open quantity
-            self.quantity_open += order[c.QUANTITY_FILLED]
-            self.credit += order[c.CREDIT]
-            self.debit += order[c.DEBIT]
+        # elif event_subtype in [c.CASHFLOW]:
+        #     # Update open quantity
+        #     self.quantity_open += order[c.QUANTITY_FILLED]
+        #     self.credit += order[c.CREDIT]
+        #     self.debit += order[c.DEBIT]
         
         return self.handle_order(order)
     
     def _handle_command(self, command):
         return self.handle_command(command)
 
-    # @property
-    # def total_pnl(self):
-    #     '''Realized + unrealized PNL'''
-    #     return self.credit + self.value_open - self.debit
+    @property
+    def total_pnl(self):
+        '''Realized + unrealized PNL'''
+        return self.credit + self.value_open - self.debit
 
     # for if we want to add custom action (e.g. notify on fill)
     def handle_data(self, data):
@@ -144,6 +155,7 @@ class Position(event_handler.EventHandler):
         }
         return d
 
+
 class CashPosition(Position):
     """A position in cash. Handles order a little differently than other positions
     """
@@ -160,6 +172,13 @@ class CashPosition(Position):
             This is as if credit and debit are with resepct to the account holding the strategy,
             while `net` is with respect to the strategy's own internal account.
         '''
+        
+        for k in [c.QUANTITY, c.QUANTITY_FILLED, c.QUANTITY_OPEN, c.CREDIT, c.DEBIT, c.COMMISSION]:
+            if k in order.keys():
+                try:
+                    order[k] = decimal.Decimal(order[k])
+                except TypeError as e:
+                    pass
 
         # log the transaction
         self.transactions.append(order)
@@ -220,6 +239,9 @@ class CashPosition(Position):
                 self.credit += credit
                 self.debit += debit
                 self.commission += commission
+                # update quantity history
+                self.quantity_history[0].append(order[c.EVENT_TS])
+                self.quantity_history[1].append(self.quantity_open)
                 
             elif event_subtype in [c.FAILED, c.EXPIRED, c.CANCELLED, c.REJECTED]:
                 self.quantity_pending -= pending_amount    # prior approx fill price

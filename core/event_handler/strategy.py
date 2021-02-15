@@ -12,6 +12,8 @@ import time
 import threading
 import copy
 
+import pandas as pd
+
 import json
 
 import zmq
@@ -508,8 +510,9 @@ class Strategy(event_handler.EventHandler):
         obj_type = (obj_type or '').upper()
 
         if (obj_type == c.DATA) or (obj_type == ''):
-            return self.datas[identifier]
-        elif (obj_type == c.POSITION) or (obj_type == ''):
+            if (obj := self.datas.get(identifier)) is not None:
+                return obj
+        if (obj_type == c.POSITION) or (obj_type == ''):
             if (position := (self.open_positions.get(identifier) or self.closed_positions.get(identifier))) is not None:
                 return position
             else:
@@ -521,7 +524,7 @@ class Strategy(event_handler.EventHandler):
                 if len(positions) > 0:
                     return positions
         # Otherwise see if there is a property/method with name identifier.
-        elif (obj_type in ['PROPERTY', 'METHOD']) or (obj_type == ''):
+        if (obj_type in ['PROPERTY', 'METHOD']) or (obj_type == ''):
             try:
                 answer = getattr(self, identifier)
             except AttributeError:
@@ -532,6 +535,8 @@ class Strategy(event_handler.EventHandler):
                 except IndexError:
                     raise Exception(f'No attribute by the name of {identifier}')
             return answer
+        
+        return
     
     def get_nav(self, identifier = None):
         # Get net asset value of a strategy / asset
@@ -975,8 +980,6 @@ class Strategy(event_handler.EventHandler):
         
         return True
 
-
-
     def place_order(self, order = None, symbol = None, quantity = None):
         """Places an order to a child, a parent, or the broker.
             Either order has to be specified as a dictionary, or symbol and quantity must be provided.
@@ -1052,7 +1055,85 @@ class Strategy(event_handler.EventHandler):
     #     else:
     #         raise Exception('No trade/position/child strategy found to liquidate.')
 
+    def get_equity_curves(self, data = None, agg = None, use_float = False):
+        
+        # If data is not provided, use self.datas
+        if data is None:
+            data = pd.concat([
+                pd.DataFrame(data = {lines.symbol: lines.mark}, index = lines.index)
+                # lines.as_pandas_df(columns = lines.mark_line).rename(columns = {lines.mark_line: lines.symbol})
+                for lines in self.datas.values()
+            ], axis = 1).sort_index()
+            data = data.fillna(method = 'ffill').fillna(decimal.Decimal('0.0'))
+            data[c.CASH] = decimal.Decimal('1.0')
+        else:
+            data = data.applymap(decimal.Decimal)
 
+        # get position quantities
+        eq_curves = {}
+        for pos in list(self.open_positions.values()) + list(self.closed_positions.values()):
+            # skip strategies---we will aggregate the underlying posiitons directly
+            if pos.asset_class != c.STRATEGY:
+                quantities = pd.Series(data = pos.quantity_history[1], index = pos.quantity_history[0])
+                # Get data with corresponding symbol
+                try:
+                    marks = data[pos.symbol]
+                except KeyError:
+                    raise Exception(f'No data for {pos.symbol} provided.')
+                # Need to align with data's index and ffill the gaps
+                idx = set(quantities.index) | set(marks.index)
+                quantities = quantities.reindex(idx).sort_index()
+                quantities = quantities.fillna(method = 'ffill').fillna(decimal.Decimal('0.0'))
+                quantities = quantities.reindex(marks.index)
+                eq_curve = quantities * marks
+
+                name = f'{pos.owner.replace(self.strategy_id, self.name)}_{pos.symbol}_{pos.position_id}'
+                eq_curves[name] = eq_curve
+
+        if agg is None:
+            df_eq_curves = pd.DataFrame(eq_curves)
+            if use_float:
+                df_eq_curves = df_eq_curves.astype(float)
+            return df_eq_curves
+        else:
+            if agg == c.OWNER:
+                n = 0
+            elif agg == c.SYMBOL:
+                n = 1
+            else:
+                raise NotImplementedError(f'Aggregation type {agg} not implemented.')
+            # aggregate by owner/symbol
+            agg_eq_curves = {}
+            for name, eq_curve in eq_curves.items():
+                agg_key = name.split('_')[n]
+                if agg_eq_curves.get(agg_key) is None:
+                    agg_eq_curves[agg_key] = eq_curve
+                else:
+                    agg_eq_curves[agg_key] += eq_curve
+            # construct dataframe and return
+            df_eq_curves = pd.DataFrame(agg_eq_curves)
+            if use_float:
+                df_eq_curves = df_eq_curves.astype(float)
+            return df_eq_curves
+        # # get quantities as dataframe
+        # position_quantities = pd.concat([
+        #     pd.DataFrame(data = {pos.symbol: pos.quantity_history[1]}, index = pos.quantity_history[0])
+        #         for pos in self.open_positions.values()
+        # ], axis = 1)
+        # # Need to align with data's index and ffill the gaps
+        # idx = set(position_quantities.index) | set(data.index)
+        # position_quantities = position_quantities.reindex(idx).sort_index()
+        # position_quantities = position_quantities.fillna(method = 'ffill').fillna(decimal.Decimal('0.0'))
+        # position_quantities = position_quantities.reindex(data.index)
+
+        # # multiply quantities and data to get equity curves
+        # eq_curves = position_quantities * data
+        # if use_float:
+        #     eq_curves = eq_curves.astype(float)
+
+        # # 
+
+        # return eq_curves
 
 # ----------------------------------------------------------------------------------------------------
 # Misc Classes and fucntions
@@ -1064,3 +1145,5 @@ class RMS(abc.ABC):
     def request_order_approval(self, position = None, order = None):
         '''approve or deny the request to place an order. Default True'''
         return True
+
+
