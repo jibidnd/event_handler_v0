@@ -9,9 +9,8 @@ import time
 import zmq
 
 from . import utils
-
-from . import constants as c
-from .data.datafeed_synchronizer import DatafeedSynchronizer
+from .utils import constants as c
+from .datafeeds.datafeed_synchronizer import DatafeedSynchronizer
 
 class Session:
     def __init__(self, socket_mode = None):
@@ -637,7 +636,7 @@ def broker_proxy(address_frontend, address_backend, capture = None, context = No
             elif socks.get(backend) == zmq.POLLIN:
                 # received order from broker: (broker ident, (strategy ident, order))
                 broker_encoded, order_packed = backend.recv_multipart()
-                order_unpacked = unpackb(order_packed)
+                order_unpacked = utils.unpackb(order_packed)
                 send_to = order_unpacked[c.STRATEGY_CHAIN][-1]
                 frontend.send_multipart([send_to.encode('utf-8'), utils.packb(order_unpacked)])
         except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated

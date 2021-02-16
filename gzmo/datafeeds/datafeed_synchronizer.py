@@ -2,7 +2,6 @@ import threading
 
 import zmq
 
-from ..data import *
 from .. import constants as c
 from .. import utils
 

@@ -1,3 +1,8 @@
+import math
+import datetime
+import pytz
+
+from . import constants as c
 
 def generate_days(start, end, step_in_days):
     '''
@@ -55,11 +60,11 @@ def unix2num(unix_timestamp, tz = pytz.timezone('UTC'), resolution = 'millisecon
     if hasattr(dt, 'hour'):
         base = math.fsum((
             base,
-            dt.hour / HOURS_PER_DAY,
-            dt.minute / MINUTES_PER_DAY,
-            dt.second / SECONDS_PER_DAY,
-            dt.microsecond / MUSECONDS_PER_DAY,
-            nanoseconds / NANOSECONDS_PER_DAY 
+            dt.hour / c.HOURS_PER_DAY,
+            dt.minute / c.MINUTES_PER_DAY,
+            dt.second / c.SECONDS_PER_DAY,
+            dt.microsecond / c.MUSECONDS_PER_DAY,
+            nanoseconds / c.NANOSECONDS_PER_DAY 
             ))
 
     return base

@@ -1,12 +1,11 @@
-import threading
-
-import zmq
 import decimal
 
-from ..data import *
-from .. import constants as c
+import zmq
+
+from . import BaseDataFeed
 from .. import utils
-from core import data
+from ..utils import constants as c
+
 
 class DatafeedCompressor(BaseDataFeed):
     

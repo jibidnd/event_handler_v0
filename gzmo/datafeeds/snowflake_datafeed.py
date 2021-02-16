@@ -5,9 +5,9 @@ import zmq
 import snowflake.connector
 from snowflake.connector.converter_null import SnowflakeNoConverterToPython
 
-from ..data import BaseDataFeed
-from .. import constants as c
+from . import BaseDataFeed
 from .. import utils
+from ..utils import constants as c
 
 class SnowflakeDataFeed(BaseDataFeed):
 

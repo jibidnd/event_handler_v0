@@ -1,3 +1,4 @@
+import importlib
 
 def _str_to_fn(self, fn_as_str):
     """
