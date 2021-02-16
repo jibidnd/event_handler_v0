@@ -1103,37 +1103,15 @@ class Strategy(event_handler.EventHandler):
             else:
                 raise NotImplementedError(f'Aggregation type {agg} not implemented.')
             # aggregate by owner/symbol
-            agg_eq_curves = {}
+            agg_eq_curves = collections.defaultdict(int)
             for name, eq_curve in eq_curves.items():
                 agg_key = name.split('_')[n]
-                if agg_eq_curves.get(agg_key) is None:
-                    agg_eq_curves[agg_key] = eq_curve
-                else:
-                    agg_eq_curves[agg_key] += eq_curve
+                agg_eq_curves[agg_key] += eq_curve
             # construct dataframe and return
             df_eq_curves = pd.DataFrame(agg_eq_curves)
             if use_float:
                 df_eq_curves = df_eq_curves.astype(float)
             return df_eq_curves
-        # # get quantities as dataframe
-        # position_quantities = pd.concat([
-        #     pd.DataFrame(data = {pos.symbol: pos.quantity_history[1]}, index = pos.quantity_history[0])
-        #         for pos in self.open_positions.values()
-        # ], axis = 1)
-        # # Need to align with data's index and ffill the gaps
-        # idx = set(position_quantities.index) | set(data.index)
-        # position_quantities = position_quantities.reindex(idx).sort_index()
-        # position_quantities = position_quantities.fillna(method = 'ffill').fillna(decimal.Decimal('0.0'))
-        # position_quantities = position_quantities.reindex(data.index)
-
-        # # multiply quantities and data to get equity curves
-        # eq_curves = position_quantities * data
-        # if use_float:
-        #     eq_curves = eq_curves.astype(float)
-
-        # # 
-
-        # return eq_curves
 
 # ----------------------------------------------------------------------------------------------------
 # Misc Classes and fucntions
