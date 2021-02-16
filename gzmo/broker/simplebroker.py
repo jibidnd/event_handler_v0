@@ -1,20 +1,28 @@
-import collections
-import copy
 
-import uuid
-from decimal import Decimal
-import datetime
-import pytz
-import time
-import threading
+# import collections
+# import copy
+
+# import uuid
+# from decimal import Decimal
+# import datetime
+# import pytz
+# import time
+# import threading
+
+# import zmq
+
+# from .. import constants as c
+# from .. import event_handler
+# from ..event_handler import event, lines
+# from .. import utils
+
+import copy
 
 import zmq
 
-from .. import constants as c
-from .. import event_handler
-from ..event_handler import event, lines
-from .position import Position, CashPosition
+from . import BaseBroker
 from .. import utils
+from ..utils import constants as c
 
 '''
     Needs:
@@ -23,94 +31,10 @@ from .. import utils
         - 
 '''
 
-class Broker(event_handler.EventHandler):
-    def __init__(self, name, fill_method, zmq_context = None, data_address = None, order_address = None, logging_addresses = None):
-        
-        # initialization params
-        self.name = name
-        self.zmq_context = zmq_context
-        self.broker_id = str(uuid.uuid1())  # Note that this shows the network address.
-        self.open_orders = {}               # better to refer to orders by id so we can refer to the same order even if attributes change
-        self.closed_orders = []
-        self.fill_method = fill_method
-
-        self.data_address = data_address
-        self.order_address = order_address
-        self.logging_addresses = logging_addresses
-
-        # Connection things
-        self.data_socket = None         # datasource to know what prices we can fill at
-        self.order_socket = None        # Broker of brokers
-        self.logging_socket = None
-
-        if self.data_address is not None:
-            self.connect_data_socket(data_address)
-        if self.order_address is not None:
-            self.connect_order_socket(order_address)
-        if self.logging_addresses is not None:
-            for logging_address in logging_addresses:
-                self.connect_logging_socket(logging_address)
-        
-        # These can be overriden for threads, but are otherwise just placeholders
-        self.main_shutdown_flag = threading.Event()
-        self.shutdown_flag = threading.Event()
-        
-        # clock is only used in "socket modes"
-        self.clock = Decimal(0.00)
+class SimpleBroker(BaseBroker):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
     
-    # ----------------------------------------------------------------------------------------
-    # Connections
-    # ----------------------------------------------------------------------------------------
-    def connect_data_socket(self, data_address):
-
-        # if new address, overwrite the current record
-        self.data_address = data_address
-        
-        # establish a context if none provided
-        if self.zmq_context is None:
-            self.zmq_context = zmq.Context.Instance()
-        
-        # Create a data socket if none exists yet
-        if not self.data_socket:
-            socket = self.zmq_context.socket(zmq.SUB)
-            self.data_socket = socket
-        
-        # subscribe to everything because we don't know what we'll need to match orders against
-        self.data_socket.setsockopt(zmq.SUBSCRIBE, b'')
-        self.data_socket.connect(data_address)
-        
-        return
-    
-    def connect_order_socket(self, order_address):
-
-        # if new address, overwrite the current record
-        self.order_address = order_address
-
-        # establish a context if none provided
-        if self.zmq_context is None:
-            self.zmq_context = zmq.Context.Instance()
-
-        # Create a order socket if none exists yet
-        if not self.order_socket:
-            socket = self.zmq_context.socket(zmq.DEALER)
-            # note that this broker is identified by its name
-            socket.setsockopt(zmq.IDENTITY, self.name.encode())
-            self.order_socket = socket
-        self.order_socket.connect(order_address)
-
-        return
-    
-    def connect_logging_socket(self, logging_address):
-        # if new address, add it to the list
-        if logging_address not in self.logging_addresses:
-            self.logging_addresses.append(logging_address)
-        # Create a logging socket if none exists yet
-        if not self.logging_socket:
-            socket = self.zmq_context.socket(zmq.DEALER)
-            socket.setsockopt(zmq.IDENTITY, self.broker_id.encode())
-            self.logging_socket = socket
-        self.logging_socket.conenct(logging_address)
-
     # ----------------------------------------------------------------------------------------
     # Event handling
     # ----------------------------------------------------------------------------------------

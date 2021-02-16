@@ -183,3 +183,18 @@ ALL = 'ALL'
 STRATEGIES_FULL = 'STRATEGIES_FULL'
 STRATEGIES_INTERNALONLY = 'STRATEGIES_INTERNALONLY'
 NONE = 'NONE'
+
+
+
+#======================================================================================================================
+# Useful constants
+#======================================================================================================================
+HOURS_PER_DAY = 24.0
+MINUTES_PER_HOUR = 60.0
+SECONDS_PER_MINUTE = 60.0
+MUSECONDS_PER_SECOND = 1e6
+NANOSECONDS_PER_SECOND = 1e9
+MINUTES_PER_DAY = MINUTES_PER_HOUR * HOURS_PER_DAY
+SECONDS_PER_DAY = SECONDS_PER_MINUTE * MINUTES_PER_DAY
+MUSECONDS_PER_DAY = MUSECONDS_PER_SECOND * SECONDS_PER_DAY
+NANOSECONDS_PER_DAY = NANOSECONDS_PER_SECOND * SECONDS_PER_DAY
