@@ -472,19 +472,19 @@ class Session:
             # Brokers will use new data to fill any outstanding orders / update states
             else:
                 for broker in self.brokers.values():
-                    if (fills := broker.try_fill_with_data(next_data)) is not None:
-                        for fill in fills:
-                            # if STRATEGIES_FULL, send order response via the socket
-                            if socket_mode == c.STRATEGIES_FULL:
-                                # prepare the response
-                                response_packed = utils.packb(fill)
-                                original_sender = fill[c.STRATEGY_CHAIN][-1]
-                                original_sender_encoded = original_sender.encode('utf-8')
-                                msg = self.broker_strategy_socket.send_multipart([original_sender_encoded, response_packed], copy = False, track = True)
-                                msg.wait()
-                            # otherwise directly have the strategy handle the event
-                            else:
-                                self.strategies[fill[c.STRATEGY_CHAIN][-1]]._handle_event(fill)
+                    fills = broker.try_fill_with_data(next_data)
+                    for fill in fills:
+                        # if STRATEGIES_FULL, send order response via the socket
+                        if socket_mode == c.STRATEGIES_FULL:
+                            # prepare the response
+                            response_packed = utils.packb(fill)
+                            original_sender = fill[c.STRATEGY_CHAIN][-1]
+                            original_sender_encoded = original_sender.encode('utf-8')
+                            msg = self.broker_strategy_socket.send_multipart([original_sender_encoded, response_packed], copy = False, track = True)
+                            msg.wait()
+                        # otherwise directly have the strategy handle the event
+                        else:
+                            self.strategies[fill[c.STRATEGY_CHAIN][-1]]._handle_event(fill)
 
             # STEP 4: STRATEGIES HANDLE DATA
             # -----------------------------------------------------------------------------------------------------

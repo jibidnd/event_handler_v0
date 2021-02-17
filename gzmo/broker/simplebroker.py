@@ -1,21 +1,26 @@
+"""A simple broker simulator that is capable of market and limit orders.
 
-# import collections
-# import copy
+The simple broker must be provided datafeeds for any symbols against which orders need to be filled.
+The simple broker is supplied with a fill_method that specifies how fills will be done, and whether
+any slippage or commission is present.
 
-# import uuid
-# from decimal import Decimal
-# import datetime
-# import pytz
-# import time
-# import threading
 
-# import zmq
+TODO:
+    fill function return true/false?
+    for every data event received:
+        for every open order:
+            try to fill
+            if any is filled, send (possibly partially) filled order
 
-# from .. import constants as c
-# from .. import event_handler
-# from ..event_handler import event, lines
-# from .. import utils
+    write functions for the following?
 
+    fill params
+    - prob fill
+    - latency | fill
+    - q | fill
+    - p | fill
+
+"""
 import copy
 
 import zmq
@@ -24,44 +29,48 @@ from . import BaseBroker
 from .. import utils
 from ..utils import constants as c
 
-'''
-    Needs:
-        - data
-        - fill strategy: quantity + price
-        - 
-'''
-
 class SimpleBroker(BaseBroker):
-    def __init__(self, fill_method, **kwargs):
-        super().__init__(**kwargs)
+    """A simple broker to simulate taking and filling market and limit orders.
+    """    
+    def __init__(self, name, fill_method, zmq_context = None):
+        """Inits a simple broker.
+
+        Args:
+            fill_method (callable[[dict], [dict]]): A callable with signature (order, data) that returns any
+                (partially or fully) filled order.
+        """  
+        super().__init__(name, zmq_context)
         self.fill_method = fill_method
     
     # ----------------------------------------------------------------------------------------
     # Event handling
     # ----------------------------------------------------------------------------------------
     def _handle_data(self, data):
-        # The broker does not keep track of data history
+        """Tries to fill existing open orders against incoming data.
 
-        # first update clock
-        # data is expected to be right aligned (EVENT_TS marks the end of the event)
-        self.clock = data[c.EVENT_TS]
-
-        fills = self.try_fill_with_data(data)
+            Note that data is expected to be right-aligned (EVENT_TS marks the end of the event).
         
-        if (fills is not None) and (self.order_socket is not None):
-            
-            # emit the order if there are any fills
+        Args:
+            data (dict): Data event.
+        """        
+        # first update clock
+        self.clock = data[c.EVENT_TS]
+        # try to fill any existing open orders
+        fills = self.try_fill_with_data(data)
+        # emit the order if there are any fills
+        if (fills is not None) and (self.order_socket is not None):            
             for order in fills:
                 order_packed = utils.packb(order)
                 self.order_socket.send(order_packed, flags = zmq.NOBLOCK)
 
         return self.handle_data(data)
 
-    def handle_data(self, data):
-        pass
-
     def _handle_order(self, order):
+        """Handles an incoming order.
 
+        Args:
+            order (dict): ORDER event.
+        """
         order_response = self.take_order(order)
         if (order_response is not None) and (self.order_socket is not None):
             # emit the response if there is any
@@ -69,10 +78,16 @@ class SimpleBroker(BaseBroker):
             self.order_socket.send(order_response_packed, flags = zmq.NOBLOCK)
         return self.handle_order(order)
 
-    def handle_order(self, order):
-        pass
-
     def take_order(self, order):
+        """Processes an incoming order.
+
+        Args:
+            order (dict): Incoming ORDER event.
+
+        Returns:
+            order: Response in the form of an ORDER event.
+        """        
+        # make a copy because we don't want to break things elsewhere.
         _order = copy.deepcopy(order)
         if _order[c.EVENT_SUBTYPE] == c.REQUESTED:
             if _order[c.ORDER_TYPE] in [c.MARKET, c.LIMIT]:
@@ -89,6 +104,7 @@ class SimpleBroker(BaseBroker):
                 self.open_orders[order_id] = _order
 
                 # acknowledge acceptance of order (with submitted status)
+                # copy because we don't want others to break our internal record of the order
                 return copy.deepcopy(_order)
 
             elif _order[c.ORDER_TYPE] == c.CANCELLATION:
@@ -97,23 +113,25 @@ class SimpleBroker(BaseBroker):
                     cancelled_order = self.open_orders.pop(_order[c.ORDER_ID])
                     cancelled_order = _order.update({c.EVENT_TS: self.clock, c.EVENT_SUBTYPE: c.CANCELLED})
                 except KeyError:
+                    # let the requester know if there is nothing to cancel
                     cancelled_order = _order.update({c.EVENT_TS: self.clock, c.EVENT_SUBTYPE: c.INVALID})
                 finally:
+                    # copy because we don't want others to break our internal record of the order
                     return copy.deepcopy(cancelled_order)
 
 
     def try_fill_with_data(self, data):
         """ Tries to fill all currently open orders against data.
-            returns a list of fills if any, otherwise returns None.
+            Returns a list of fills (or empty list if no fills).
 
         Args:
-            data (tuple(bytes, dict)): (topic, data event).
+            data (dict): DATA event to be filled against.
 
         Returns:
-            list or None: list of fills if any, otherwise None.
+            list (list): list of any fills.
         """
         # keeping track of orders closed/filled with this data event
-        # recall that we cannot change the dictionary size mid-iteration
+        # since we cannot change the dictionary size mid-iteration
         closed = []
         fills = []
 
@@ -125,7 +143,6 @@ class SimpleBroker(BaseBroker):
             # try to fill each order
             for order_id, open_order in self.open_orders.items():
                 if (symbol_order := open_order[c.SYMBOL]) == symbol_data:
-                    # print('broker filling with ' + str(data))
                     # If there is a fill (partial or complete)
                     if self.fill_method(open_order, data):
                         # can forget this order if the order is fully filled
@@ -142,58 +159,6 @@ class SimpleBroker(BaseBroker):
                 self.closed_orders.append(self.open_orders.pop(order_id))
 
             return fills
-
-    def run(self):
-
-        # the event "queue"
-        next_events = {}
-
-        while (not self.main_shutdown_flag.is_set()) and (not self.shutdown_flag.is_set()):
-            
-            # get from data socket if slot is empty
-            if next_events.get(c.DATA_SOCKET) is None:
-                try:
-                    # This is a SUB
-                    topic, event_packed = self.data_socket.recv_multipart(zmq.NOBLOCK)
-                    next_events[c.DATA_SOCKET] = utils.unpackb(event_packed)
-                except zmq.ZMQError as exc:
-                    # nothing to get
-                    if exc.errno == zmq.EAGAIN:
-                        pass
-                    else:
-                        raise
-            
-            # get from order socket if slot is empty
-            if next_events.get(c.ORDER_SOCKET) is None:
-                try:
-                    # This is a dealer
-                    order_packed = self.order_socket.recv(zmq.NOBLOCK)
-                    order_unpacked = utils.unpackb(order_packed)
-                    next_events[c.ORDER_SOCKET] = order_unpacked
-                except zmq.ZMQError as exc:
-                    # nothing to get
-                    if exc.errno == zmq.EAGAIN:
-                        pass
-                    else:
-                        raise
-
-            # Sort the events
-            if len(next_events) > 0:
-                # Handle the socket with the next soonest event (by EVENT_TS)
-                next_socket = sorted(next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
-                next_event = next_events.pop(next_socket)        # remove the event from next_events
-                # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
-                if (tempts := next_event[c.EVENT_TS]) > self.clock:
-                    self.clock = tempts
-
-                self._handle_event(next_event)
-
-    def shutdown(self):
-        self.shutdown_flag.set()
-        for socket in [self.data_socket, self.order_socket, self.logging_socket]:
-            socket.close(linger = 10)
-
-
 
 
 
@@ -255,18 +220,3 @@ def immediate_fill(order, data, fill_strategy = c.CLOSE, commission = 0.0):
         return True
     else:
         return False
-
-
-# fill function return true/false?
-# for every data event received:
-#     for every open order:
-#         try to fill
-#         if any is filled, send (possibly partially) filled order
-
-# write functions for the following?
-
-# fill params
-# - prob fill
-# - latency | fill
-# - q | fill
-# - p | fill
