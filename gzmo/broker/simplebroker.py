@@ -32,8 +32,9 @@ from ..utils import constants as c
 '''
 
 class SimpleBroker(BaseBroker):
-    def __init__(self, **kwargs):
+    def __init__(self, fill_method, **kwargs):
         super().__init__(**kwargs)
+        self.fill_method = fill_method
     
     # ----------------------------------------------------------------------------------------
     # Event handling
@@ -60,7 +61,6 @@ class SimpleBroker(BaseBroker):
         pass
 
     def _handle_order(self, order):
-        # print('received order for {} at {}'.format(utils.unix2datetime(order['EVENT_TS']), utils.unix2datetime(self.clock)))
 
         order_response = self.take_order(order)
         if (order_response is not None) and (self.order_socket is not None):
