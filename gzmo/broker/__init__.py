@@ -1,5 +1,4 @@
-"""Base broker class.
-"""
+"""Base broker class."""
 
 import abc
 import uuid
@@ -73,7 +72,7 @@ class BaseBroker(event_handler.EventHandler):
         """Connects a socket to the specified `data_address`.
 
         Args:
-            data_address (str): A ZMQ address string in the form of 'protocol://interface:port’.
+            data_address (str): @abc.abstractmethod
         """
         # if new address, overwrite the current record
         self.data_address = data_address

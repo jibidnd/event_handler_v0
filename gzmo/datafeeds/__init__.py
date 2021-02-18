@@ -1,66 +1,66 @@
-import abc
-import zmq
-import msgpack
-import threading
+"""Base datafeed class."""
 
-from .. import constants as c
-from .. import utils
+import zmq
+import threading
+import abc
 
 class BaseDataFeed:
+    """Base datafeed class.
 
-    def __init__(self, topic, zmq_context = None):
-        """Base datafeed class.
+        ALL BARS MUST BE RIGHT-EDGE-ALIGNED (timestamp for bar signifies end of bar period).
 
-            ALL BARS MUST BE RIGHT-EDGE-ALIGNED (timestamp for bar signifies end of bar period).
+        A datafeed provides data in one of two ways: `publish` and `fetch`.
 
-            A datafeed provides data in one of two ways: `publish` and `fetch`.
+        `publish` publishes data to the data socket, which can be specified after initialization.
+        `fetch` returns the next record when called.
 
-            `publish` publishes data to the datafeed's address, which can be specified after initialization.
-            `fetch` returns a record when called.
-
-            An optional `start_sync` can be used to sync starting times between multiple datafeeds.
+        Attributes:
+            topic (str): The topic the datafeed will be published under (in a PUB socket).
+            zmq_context (ZMQ Context): ZMQ context instance for publishing.
+            from_beginning (bool): Indicates whether to re-execute the query.
+            start_sync (threading.Event): can be used to sync starting times between multiple datafeeds.
                 To use it, simply assign `datafeed.start_sync` to a common threading.Event() instance,
                 start all the datafeeds, and `set` the threading.Event() instance.
+            main_shutdown_flag (threading.Event): If threading is used, this event can be set to signal that the main session has shut down.
+            shutdown_flag (threading.Event): If threading is used, this event can be set to signal the datafeed to shut down.
+    """
 
-            `from_beginning` allows for pauses between calls without losing progress. If set to True when `fetch` or `publish`
-                is called, the datafeed will re-execute the query, if approapriate.
-            
-            `main_shutdown_flag` is intended to be set by the main thread, if used in a threading context.
-            `shutdown_flag` can be set to indicate intention to stop the datafeed. The choice of threading.Event instead of
-                boolean is somewhat arbitrary.
+    def __init__(self, topic, zmq_context = None):
+        """ Inits a datafeed object.
 
         Args:
-            topic (str): the topic attached to the datafeed.
-            zmq_context (zmq.Context.instance(), optional): ZMQ context instance for publishing. Defaults to None.
+            topic (str): The topic the datafeed will be published under (in a PUB socket).
+            zmq_context (zmq.Context, optional): ZMQ context instance for publishing. Defaults to None.
         """
         self.topic = topic
         self.zmq_context = zmq_context or zmq.Context.instance()
         self.from_beginning = True
         self.start_sync = threading.Event(); self.start_sync.set()  # default to not block for a sync
         self.is_finished = False
-        # main_shutdown_flag is intended to be set by the main thread, if used in a threading context
         self.main_shutdown_flag = threading.Event()
         self.shutdown_flag = threading.Event()
 
     def publish_to(self, address):
-        """tell the datafeed where to publish to (if publishing is desired).
+        """ Tells the datafeed where to publish to (if sockets are used).
 
         Args:
-            address (str): socket to publish data to
+            address (str): A ZMQ address string in the form of 'protocol://interface:port’.
         """
         self.address = address
-        
         # Connect to a port
         self.sock_out = self.zmq_context.socket(zmq.PUB)
         # Note here we connect to this addres (instead of bind) because we have
         #    a multiple publisher (datafeeds) - one subscriber (session) pattern
         self.sock_out.connect(address)
 
+    @abc.abstractmethod
     def execute_query(self):
         pass
 
+    @abc.abstractmethod
     def fetch(self, limit = 1):
         pass
-        
+    
+    @abc.abstractmethod
     def publish(self):
         pass
