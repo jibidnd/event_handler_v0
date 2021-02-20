@@ -1,4 +1,4 @@
-"""Positions are exposures in assets (could also be a strategy)"""
+"""A Position describes the owner's exposure in an asset."""
 
 
 import abc
@@ -69,7 +69,7 @@ class Position(event_handler.EventHandler):
 
         Returns:
             str: Summary of the position.
-        """        
+        """
         keys = ['owner', 'symbol', 'position_id', 'quantity_open', 'quantity_pending']
         d = {}
         for key in keys:

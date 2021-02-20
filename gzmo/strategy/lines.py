@@ -1,3 +1,4 @@
+"""A Lines object is a collection of time series belonging to one asset (symbol)."""
 import collections
 import bisect
 import itertools
@@ -8,7 +9,7 @@ from ..utils import constants as c
 
 class lines(dict):
     """
-    A lines object is a collection of time series (deques) belonging to one asset (symbol).
+    A Lines object is a collection of time series belonging to one asset (symbol).
     
     The lines object is primarily designed to quickly process incoming data (hence the use of deques).
     Each lines should consist of data from one symbol, for one specific resolution.

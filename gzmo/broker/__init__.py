@@ -72,7 +72,7 @@ class BaseBroker(event_handler.EventHandler):
         """Connects a socket to the specified `data_address`.
 
         Args:
-            data_address (str): @abc.abstractmethod
+            data_address (str): A ZMQ address string in the form of 'protocol://interface:port’.
         """
         # if new address, overwrite the current record
         self.data_address = data_address
