@@ -49,21 +49,28 @@ class EventHandler(abc.ABC):
         else:
             raise Exception('Event type {} not supported.'.format(event_type))
 
-
-    
-    @abc.abstractmethod
+    # @abc.abstractmethod
     def _handle_data(self, data):
         '''Handle a data event'''
-        return
+        return self.handle_data(data)
     
-    @abc.abstractmethod
+    def handle_data(self, data):
+        pass
+    
+    # @abc.abstractmethod
     def _handle_order(self, order):
         '''Handle an order event.'''
-        return
+        return self.handle_order(order)
+    
+    def handle_order(self, order):
+        pass
 
     # @abc.abstractmethod
     def _handle_communication(self, communication):
-        return
+        return self.handle_communication(communication)
+    
+    def handle_communication(self, communication):
+        pass
     
     def _preprocess_event(self, event):
         return event

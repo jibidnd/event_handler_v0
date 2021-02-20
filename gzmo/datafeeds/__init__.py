@@ -61,6 +61,67 @@ class BaseDataFeed:
     def fetch(self, limit = 1):
         pass
     
-    @abc.abstractmethod
     def publish(self):
-        pass
+        """Publishes the queried data to the socket.
+
+            The queried data will be published to the socket, record by record, until
+            all records have been published.
+
+            When called, it will wait for the `start_sync` flag to be set, if not already.
+            Then, it will fetch one record at a time from the connector cursor, and publish
+            the record under the `topic` of the datafeed. The record will be packed as a
+            msgpack message.
+
+            If self.from_beginning is True (as it is set when the datafeed is instantiated),
+            the query will be executed when this method is called.
+
+            Note that if the ZMQ queue is full, DATA WILL BE (SILENTLY) DROPPED.
+        """        
+        # if starting over
+        if self.from_beginning:
+            self.execute_query()
+        
+        # wait for the starting signal
+        self.start_sync.wait()
+
+        # Keep going?
+        while (not self.main_shutdown_flag.is_set()) and \
+                (not self.shutdown_flag.is_set()) and \
+                (not self.is_finished):
+            
+            # get one row of result everytime
+            # maybe slower but won't have to worry about size of results
+            if (res := self.fetch(limit = 1)) is not None:
+                try:
+                    # send the event with a topic
+                    res_packed = utils.packb(res)
+                    self.sock_out.send_multipart([self.topic.encode(), res_packed], flag = zmq.NOBLOCK)
+                except zmq.ZMQError as exc:
+                    # Drop messages if queue is full
+                    if exc.errno == zmq.EAGAIN:
+                        pass
+                    else:
+                        # unexpected error: shutdown and raise
+                        self.shutdown()
+                        raise
+                except zmq.ContextTerminated:
+                    # context is being closed by session
+                    self.shutdown()
+                except:
+                    raise
+            else:
+                # no more results
+                self.is_finished = True
+                self.shutdown()
+
+                break
+        
+        # shut down gracefully
+        self.shutdown()
+
+        return
+
+    def shutdown(self):
+        """Shuts down gracefully."""
+        self.shutdown_flag.set()
+        self.sock_out.close(linger = 10)
