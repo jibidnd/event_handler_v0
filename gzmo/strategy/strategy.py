@@ -646,20 +646,36 @@ class Strategy(event_handler.EventHandler):
     ----------------------------------------------------------------------------------------------------
     """
     def get(self, identifier, obj_type = None):
-        """ `get`s an object from the strategy by the identifier.
-            The identifier could be a property/method name, a symbol with a corresponding lines object,
-            or a position with
-            If an id is provided, the method will look in the following order:
-                self.open_trades, self.open_positions, self.closed_trades, self.closed_positions
+        """ `get`s an attribute from the strategy by the identifier.
+
+            The identifier could be a property/method name, a symbol, or an attribute or method name
+            of the Strategy.
+            If obj_type is not specified, the `get` method finds matches in the following order:
+                - Data
+                - Position
+                - Property or method
 
         Args:
-            identifier (str): The name of the object or an identifier of the object.
+            identifier (str): The name of the object or an identifier of the object. Can be one of the following:
+                - symbol of a dataline
+                - position_id of a position
+                - symbol of a position
+                - name of a property/method
+            obj_type (str, optional): One of ['DATA', 'POSITION', 'PROPERTY', 'METHOD'] or None.
+                Specifices the type of the object the user is looking for. If obj_type is None,
+                the `get` method finds matches in the following order:
+                    - Data
+                    - Position
+                    - Property or method
+
         """
         obj_type = (obj_type or '').upper()
 
+        # if looking for datalines
         if (obj_type == c.DATA) or (obj_type == ''):
             if (obj := self.datas.get(identifier)) is not None:
                 return obj
+        # if looking for a position
         if (obj_type == c.POSITION) or (obj_type == ''):
             if (position := (self.open_positions.get(identifier) or self.closed_positions.get(identifier))) is not None:
                 return position
@@ -687,8 +703,19 @@ class Strategy(event_handler.EventHandler):
         return
 
     def get_nav(self, identifier = None):
-        # Get net asset value of a strategy / asset
+        """Returns the net asset value of an asset.
+
+        Args:
+            identifier (str, optional): Identifier of the asset. Can be a symbol
+                of a non-strategy asset, or the symbol of a child strategy. If None,
+                returns the NAV of the current Strategy. Defaults to None.
+
+        Returns:
+            The net asset value of the asset.
+        """
         nav = 0
+        # Get values of all non-strategy open positions of the strategy.
+        # This will include all assets owned by any child strategies.
         if identifier is None:
             for position in self.open_positions.values():
                 if position.asset_class != c.STRATEGY:
@@ -696,6 +723,10 @@ class Strategy(event_handler.EventHandler):
                         nav += self.get_mark(position.symbol) * position.quantity_open
 
         else:
+            # otherwise the identifier is one of two things:
+            # either a child strategy, or a non-strategy asset.
+            # If it is a strategy, sum up the values of all assets under that strategy,
+            # if it is a non-strategy asset, sum up the values of all positions under the specified symbol.
             for position in self.open_positions.values():
                 if (position.owner == identifier) or ((position.symbol == identifier) and (position.asset_class != c.STRATEGY)): # ??
                     if position.quantity_open != 0:
@@ -703,10 +734,12 @@ class Strategy(event_handler.EventHandler):
         return nav
 
     def get_ncf(self, identifier = None):
-        """
-            Get the net cash flow caused by a position/strategy.
-            If identifier is None (default), gets the net cash flow caused
-            by the strategy to the account holding the strategy.
+        """Returns the net cash flow caused  by a position/strategy.
+
+        Args:
+            identifier (str, optional): Identifier of the position. If None,
+                returns the net cash flow caused by the current strategy (w.r.t.
+                to the account holding the strategy).
         """
         identifier = identifier or self.strategy_id
 
@@ -714,12 +747,10 @@ class Strategy(event_handler.EventHandler):
         for position in self.open_positions.values():
             if (position.owner == identifier) or (position.symbol == identifier):
                 ncf += (position.credit - position.debit)
-                # if position.symbol == c.CASH:
-                #     ncf -= position.investment
         return ncf
 
     def get_mark(self, identifier = None):
-        """Get the mark of an asset
+        """Returns the mark of an asset.
 
         Args:
             asset (str): the name / identifier of the asset
@@ -757,14 +788,26 @@ class Strategy(event_handler.EventHandler):
 
 
     def get_totalpnl(self, identifier = None):
+        """Returns realized + unrealized PNL.
+        
+        Returns credit - debit + open value.
+        Realized and unrealized PNL are not available separately
+        because they depend on accounting methods.
 
+        Args:
+            asset (str): the name / identifier of the asset. If None,
+                returns the total pnl of the current strategy. Defaults to None.
+
+        Returns:
+            decimal.Decimal: Total cash flow + net asset value.
+        """
         if identifier == c.CASH:
             return 0.0
         else:
             return self.get_ncf(identifier) + self.get_nav(identifier)
 
     def get_openpositionsummary(self):
-        """summarize current positions on the owner/symbol level"""
+        """Summarize current positions on the owner/symbol level"""
         d = {}
         for position in self.open_positions.values():
             if position.owner not in d.keys():
@@ -801,7 +844,7 @@ class Strategy(event_handler.EventHandler):
                 self.open_positions[position.position_id] = position
 
 
-
+    #TODO
     # def value_open(self, identifier = None):
     #     """
     #     This is the sum of values of current open positions, EXCLUDING CASH.
@@ -844,47 +887,27 @@ class Strategy(event_handler.EventHandler):
     #                     if identifier in (position_id, position.trade_id, position.symbol)])
     #     return v
 
-    # def total_pnl(self, identifier = None):
-    #     # TODO: identifier can be a trade or a symbol
-    #     """Realized + unrealized PNL"""
-    #     if identifier is None:
-    #         credit = sum([position.credit for position_id, position in self.open_positions.items()]) \
-    #                     + sum([position.credit for position_id, position in self.closed_positions.items()])
-    #         debit = sum([position.debit for position_id, position in self.open_positions.items()]) \
-    #                     + sum([position.debit for position_id, position in self.closed_positions.items()])
-    #     else:
-    #         if identifier in self.open_positions.keys():
-    #             credit = self.open_positions[identifier].credit
-    #             debit = self.open_positions[identifier].debit
-    #         elif identifier in self.closed_positions.keys():
-    #             credit = self.closed_positions[identifier].credit
-    #             debit = self.closed_positions[identifier].debit
-    #         else:
-    #             raise Exception('position not found')
-    #     return credit + self.value_open - debit
 
-    # @property
-    # def net_asset_value(self):
-    #     """
-    #     This is the sum of cash and values of current open positions.
-    #     """
-    #     # pending orders do not affect cash balance
-    #     nav = sum([position.value_open for position_id, position in self.open_positions.items()])
-    #     nav += self.cash.balance
-    #     return nav
-
-    # @property
-    # def mark(self):
-    #     """NAV / total cash deposited"""
-    #     if self.cash.net_flow != 0:
-    #         return self.net_asset_value / self.cash.net_flow
-    #     else:
-    #         return self.net_asset_value
 
     def to_child(self, child, message):
+        """Sends a message to a child.
+        
+        Args:
+            child (str or bytes): The identifier of the child. Can be one of the following:
+                - Child symbol as string
+                - Child strategy_id as string
+                - Child strategy_id as bytes
+                To broadcast the message to all children, specify child = ''.
+            message (str or dict): If a string is provided, the message will be sent in the
+                'MESSAGE' field of the communication event with the default parameters.
+                If a dict is provided, the message will be padded with the default communication
+                event parameters.
         """
-            To send message to all children, simply specify child = ''
-        """
+        # convenient method to broadcast message to all children
+        if child == '':
+            for child_id in self.children.values():
+                self.to_child(child_id, message)
+            return
 
         # Who to send to?
         # if child is specified by name (symbol), get the strategy_id, as it is what the child is subscribed to
@@ -909,6 +932,14 @@ class Strategy(event_handler.EventHandler):
         return
 
     def to_parent(self, message):
+        """Sends a message to the parent.
+
+        Args:
+            message (str or dict): If a string is provided, the message will be sent in the
+                'MESSAGE' field of the communication event with the default parameters.
+                If a dict is provided, the message will be padded with the default communication
+                event parameters.
+        """        
         # default message details
         default_params = {c.EVENT_TYPE: c.COMMUNICATION, c.EVENT_SUBTYPE: c.INFO, c.EVENT_TS: self.clock}
         communication_params = {c.SENDER_ID: self.strategy_id, c.RECEIVER_ID: self.parent}
@@ -928,7 +959,7 @@ class Strategy(event_handler.EventHandler):
 
         Args:
             event (dict-like): The event to be processed.
-            direction (UP / DOWN): [description]
+            direction (UP / DOWN): "UP" means towards the parent; "DOWN" means towards the children.
         """
         if c.STRATEGY_CHAIN not in event.keys():
             event[c.STRATEGY_CHAIN] = []
@@ -946,7 +977,18 @@ class Strategy(event_handler.EventHandler):
     # Action stuff
     # ----------------------------------------------------------------------------------------------------
     def create_position(self, symbol, owner = None, asset_class = None, trade_id = None, position_id = None):
+        """Creates a position and add it to self.open_positions.
 
+        Args:
+            symbol (str): The symbol of the asset for the position.
+            owner (str, optional): The owner of the position. If None, defaults to self. Defaults to None.
+            asset_class (str, optional): The asset class the asset belongs to. If None, defaults to equity. Defaults to None.
+            trade_id (str, optional): A convenient way to keep track of trades. Defaults to None.
+            position_id (str, optional): The position ID. If None, one is automatically generated by UUID. Defaults to None.
+
+        Returns:
+            strategy.position: The newly created position.
+        """
         owner = owner or self.strategy_id
         asset_class = asset_class or c.EQUITY
 
@@ -956,7 +998,8 @@ class Strategy(event_handler.EventHandler):
 
     def create_order(self, symbol, quantity, position = None, order_details = None):
         """Creates an order with the provided symbol and quantity.
-            Other parameters are filled with defaults unless otherwise specified in order_details.
+
+            Parameters are filled with defaults unless otherwise specified in order_details.
 
         Args:
             symbol (str): The symbol to create an order for.
@@ -1007,10 +1050,10 @@ class Strategy(event_handler.EventHandler):
             c.ORDER_ID: str(uuid.uuid1()),
             c.SYMBOL: position.symbol,
             c.ORDER_TYPE: c.MARKET,
-            c.QUANTITY: quantity,
+            c.QUANTITY: decimal.Decimal(quantity),
             c.EVENT_TS: self.clock.timestamp(),
             c.PRICE: default_price,
-            c.QUANTITY_OPEN: quantity
+            c.QUANTITY_OPEN: decimal.Decimal(quantity)
             }
 
         # if the target is a child, this is a cashflow. Change a few default arguments
@@ -1021,8 +1064,8 @@ class Strategy(event_handler.EventHandler):
         if symbol in self.children.values():
             default_order[c.ASSET_CLASS] = c.STRATEGY
             default_order[c.EVENT_SUBTYPE] = c.CASHFLOW
-            default_order[c.CREDIT] = -quantity if quantity < 0 else 0
-            default_order[c.DEBIT] = quantity if quantity > 0 else 0
+            default_order[c.CREDIT] = -decimal.Decimal(quantity) if quantity < 0 else 0
+            default_order[c.DEBIT] = decimal.Decimal(quantity) if quantity > 0 else 0
             default_order[c.QUANTITY_FILLED] = default_order.pop(c.QUANTITY_OPEN)
 
         order = {**default_order, **order_details}
@@ -1129,7 +1172,7 @@ class Strategy(event_handler.EventHandler):
         return True
 
     def place_order(self, order = None, symbol = None, quantity = None):
-        """Places an order to a child, a parent, or the broker.
+        """Places an order to a child, a parent, or a broker.
             Either order has to be specified as a dictionary, or symbol and quantity must be provided.
 
         Args:
@@ -1163,9 +1206,9 @@ class Strategy(event_handler.EventHandler):
         return
 
     def deny_order(self, order):
-        """
-        Deny the request to place an order.
-        Send the denial to the child.
+        """Denies the request to place an order.
+        
+        Sends the denied order to the child.
         """
         order = order.update(event_subtype = c.DENIED)
         order = self.format_strategy_chain(event, c.DOWN)
@@ -1204,6 +1247,25 @@ class Strategy(event_handler.EventHandler):
     #         raise Exception('No trade/position/child strategy found to liquidate.')
 
     def get_equity_curves(self, data = None, agg = None, use_float = False):
+        """Returns the equity curve of assets under the strategy.
+
+        The equity curves can be requested at one of three levels:
+            - individual position (unique on position_id)
+            - symbols (exposures under one asset are aggregated)
+            - owner (exposures under one owner are aggregated)
+
+        Args:
+            data (pd.DataFrame, optional): If provided, used as the marks of the assets.
+                The data should be provided as a dataframe, with timestamp (consistent with
+                the strategy's internal format) as the index, and the symbol of assets as column
+                headers. If None, self.datas will be used. Defaults to None.
+            agg (str, optional): The level to aggregate to. If provided, must be one of ['OWNER', 'SYMBOL'].
+                If None, each position's equity curve will be returned as separate columns. Defaults to None.
+            use_float (bool, optional): Whether to convert the returned dataframe values to float. Defaults to False.
+        
+        Returns:
+            pd.DataFrame: The equity curves of positions/symbols/strategies as columns of a dataframe, indexed by timestamp.
+        """        
 
         # If data is not provided, use self.datas
         if data is None:
