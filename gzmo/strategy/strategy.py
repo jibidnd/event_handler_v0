@@ -416,6 +416,7 @@ class Strategy(event_handler.EventHandler):
                                     [self.communication_socket, self.data_socket, self.order_socket]):
                 if socket is None: continue
                 if next_events.get(name) is None:
+                    self._prenext()
                     try:
                         # Attempt to receive from each socket, but do not block
                         if socket.socket_type in [zmq.SUB, zmq.ROUTER]:
@@ -439,9 +440,9 @@ class Strategy(event_handler.EventHandler):
                 # take the first item (socket name) of the first item ((socket name, event)) of the sorted queue
                 next_socket = sorted(next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
                 next_event = next_events.pop(next_socket)        # remove the event from next_events
-                self._handle_event(next_event)
+                self._process_event(next_event)
 
-    def before_stop(self):
+    def _before_stop(self):
         """Things to execute prior to exiting.
 
         Gives user a chance to wrap things up and exit clean. To be overridden.
@@ -449,7 +450,7 @@ class Strategy(event_handler.EventHandler):
         """
         pass
 
-    def stop(self):
+    def _stop(self):
         """Exits clean.
 
         Called after `before_stop` is called.
@@ -498,17 +499,15 @@ class Strategy(event_handler.EventHandler):
 
         return self.preprocess_event(event)
 
-    def _handle_event(self, event):
+    def _process_event(self, event):
         "Overrides the parent handle_event method to update clock."
-        # Run code that needs to be executed bofore handling any event
-        self._prenext()
 
         # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
         if (event_ts := event[c.EVENT_TS]) > self.clock.timestamp():
             self.clock = utils.unix2datetime(event_ts)
-        return super()._handle_event(event)
+        return super()._process_event(event)
 
-    def _handle_data(self, data):
+    def _process_data(self, data):
         """Updates lines in self.datas with data event."""
         try:
             symbol = data[c.SYMBOL]
@@ -520,11 +519,12 @@ class Strategy(event_handler.EventHandler):
         # If a line exists, update it
         if self.datas.get(symbol) is not None:
             self.datas[symbol].update_with_data(data)
-        return self.handle_data(data)
         
-    def _handle_order(self, order):
-        """
-        Handles an order event.
+        self.process_data(data)
+        return
+
+    def _process_order(self, order):
+        """Processes an order event.
 
         Two types of order events can happen here:
         1) A "pass through"
@@ -566,10 +566,12 @@ class Strategy(event_handler.EventHandler):
             if len(order[c.STRATEGY_CHAIN]) != 0:
                 original_sender = order[c.STRATEGY_CHAIN].pop()
                 self.to_child(original_sender, order)
-        return self.handle_order(order)
+        
+        self.process_order(order)
+        return
 
-    def _handle_communication(self, communication):
-        """Handles a communication event.
+    def _process_communication(self, communication):
+        """Processes a communication event.
 
         If the communication is an attribute, respond to the sender with the value of the attribute.
         If the communication is a method of the strategy, call the method and respond to the sender
@@ -605,29 +607,8 @@ class Strategy(event_handler.EventHandler):
         else:
             pass
         
-        return self.handle_communication(communication)
-
-    def prenext(self):
-        """To be overriden for actions to do before receiving next event."""
-        pass
-
-    @abc.abstractmethod
-    def handle_data(self, event):
-        """Handles data. To be overridden.
-        
-        The "algorithm" or "business logic" of the strategy is specified here.
-        """
-        pass
-
-    def handle_order(self, order):
-        """Additional action when handling orders. To be overriden.
-
-        Called after `_handle_order`.
-        """        
-        pass
-
-    def handle_communication(self, command_event):
-        """Additional action when handling communication. To be overriden.
+        self.process_communication(communication)
+        return
     
     
     """
