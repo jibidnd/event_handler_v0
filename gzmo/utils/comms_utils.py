@@ -1,3 +1,4 @@
+"""Functions for sending things around."""
 import random
 import string
 import socket
@@ -9,8 +10,20 @@ import pytz
 import msgpack
 
 
-# Getting a random free tcp port in python using sockets
 def get_free_tcp_address(port = 1234, max_port = 1300, exclude = None):
+    """Gets a random free tcp port using sockets.
+
+    Attempts to find a free tcp port between `port` and `max_port`, inclusive.
+    Any ports to be avoided can be specified in `exclude`.
+
+    Args:
+        port (int, optional): Port to start trying. Defaults to 1234.
+        max_port (int, optional): Port to stop trying. Defaults to 1300.
+        exclude ([type], optional): Ports to exclude. Defaults to None.
+
+    Returns:
+        str, str, int: The free tcp address.
+    """    
     exclude = exclude or []
     while port <= max_port:
         try:
@@ -33,6 +46,14 @@ def get_free_tcp_address(port = 1234, max_port = 1300, exclude = None):
     raise IOError('No free ports.')
 
 def get_inproc_address(exclude = None):
+    """Generates a random inproc address.
+
+    Args:
+        exclude ([type], optional): Ports to exclude. Defaults to None.
+
+    Returns:
+        str: The generated inproc address.
+    """    
     
     exclude = exclude or []
     while True:
@@ -45,12 +66,22 @@ def get_inproc_address(exclude = None):
 
 def default_pre_packer(obj):
     """ "Prepacks" certain data types before passing to msgpack.
-        msgpack's default packer option kicks in after the module attempts
-        to handle the known datatypes. E.g. custom handling of float is not
-        handled.
+
+    msgpack's "default packer" option kicks in after the module attempts
+    to handle the known datatypes. i.e. custom handling of float is not
+    handled.
+
+    This prepacker should be applied before objects are passed to msgpack. A
+    corresponding ext_hook must be applied when unpacking the object.
+
+    This prepacker does the following conversions:
+        - converts datetime.datetime objects to a msgpack extended type with typecode 5,
+            with tzinfo attached. If a naive datetime object is passed, assumes system
+            local timezone.
+        - converts decimal objects to a msgpack extended type with typecode 10.
 
     Args:
-        obj ([type]): [description]
+        obj: The object to be prepacked.
     """    
     if isinstance(obj, datetime.datetime):
         if (tzinfo := obj.tzinfo) is None:
@@ -67,9 +98,16 @@ def default_pre_packer(obj):
     return processed
 
 def packb(obj):
+    """Convenient way to set the default pre packer in packing."""
     return msgpack.packb(obj, default = default_pre_packer)
 
 def ext_hook(ext_type_code, data):
+    """Applies conversion to msgpack ext_types defind in default_pre_packer.
+
+    Any msgpack ext_type defined in default_pre_packer must be unpacked by a
+    corresponding ext_hook. See `default_pre_packer` for details of the object
+    types that are dealt with here.
+    """
     # Handle it if it is one of the pre-defined ext_types
     if ext_type_code == 5:
         isoformat, tzinfo = msgpack.unpackb(data)
@@ -88,4 +126,5 @@ def ext_hook(ext_type_code, data):
         return msgpack.ExtType(ext_type_code, data)  
 
 def unpackb(obj):
+    """Convenient way to set the ext_hook in unapcking."""
     return msgpack.unpackb(obj, ext_hook = ext_hook)

@@ -335,7 +335,7 @@ class Strategy(event_handler.EventHandler):
 
     def add_cash(self, amount):
         """Adds cash.
-        
+
         Cash is added by creating a "filled" order event (and hence the transaction will not have any 'REQUESTED' counterparts).
         The shares are diluted so that the mark of the strategy is not changed by adding cash.
 
@@ -377,7 +377,7 @@ class Strategy(event_handler.EventHandler):
 
         The main event loop continuously checks for events from the communication, data,
             and order sockets and handles them.
-        
+
         At any time, the strategy will have visibility of the next event from each socket:
         Data, order, communication; as stored in next_events.
         If any of these slots are empty, the strategy will make 1 attempt to receive data
@@ -433,7 +433,7 @@ class Strategy(event_handler.EventHandler):
                             raise
 
 
-            # Now we can sort the upcoming events and handle the next event
+            # Now we can sort the upcoming events and process the next event
             if len(next_events) > 0:
                 # Handle the socket with the next soonest event (by EVENT_TS)
                 # take the first item (socket name) of the first item ((socket name, event)) of the sorted queue
@@ -443,15 +443,15 @@ class Strategy(event_handler.EventHandler):
 
     def before_stop(self):
         """Things to execute prior to exiting.
-        
+
         Gives user a chance to wrap things up and exit clean. To be overridden.
         Called before `stop` is called.
         """
         pass
 
     def stop(self):
-        """Exits clean. 
-        
+        """Exits clean.
+
         Called after `before_stop` is called.
         """
         self.before_stop()
@@ -475,24 +475,17 @@ class Strategy(event_handler.EventHandler):
     ----------------------------------------------------------------------------------------------------
     """
 
-    def _prenext(self):
-        """Things to do prior to receiving the next event.
-        
-        Place holder for internal use. For user-defined events, see `prenext`.
-        """
-        return self.prenext()
-
     def _preprocess_event(self, event):
-        """Preprocesses an event.
+        """Overrides parent method to handle event_ts.
 
-        Called before `preprocess_event`, which is meant to be overridden.
+        Called before `preprocess_event`, which may be overridden.
 
         Args:
             event (dict): Event to be preprocessed.
 
         Returns:
             event: The preprocessed event.
-        """        
+        """
         # preprocess received events prior to handling them
 
         # localize the event ts
@@ -528,7 +521,7 @@ class Strategy(event_handler.EventHandler):
         if self.datas.get(symbol) is not None:
             self.datas[symbol].update_with_data(data)
         return self.handle_data(data)
-
+        
     def _handle_order(self, order):
         """
         Handles an order event.
@@ -583,10 +576,10 @@ class Strategy(event_handler.EventHandler):
             with any returned values from the method.
         If the communication is a response from a prior communication, actions must be specified
             (e.g. openpositionsummary).
-        
+
         Args:
             communication (event): The communication event.
-        """        
+        """
         if communication[c.EVENT_SUBTYPE] == c.REQUEST:
 
             answer = getattr(self, communication[c.MESSAGE])
@@ -611,7 +604,7 @@ class Strategy(event_handler.EventHandler):
                 self.load_openpositions(info)
         else:
             pass
-
+        
         return self.handle_communication(communication)
 
     def prenext(self):
@@ -635,11 +628,8 @@ class Strategy(event_handler.EventHandler):
 
     def handle_communication(self, command_event):
         """Additional action when handling communication. To be overriden.
-
-        Called after `_handle_communication`.
-        """   
-        pass
-
+    
+    
     """
     ----------------------------------------------------------------------------------------------------
     Info things
@@ -789,7 +779,7 @@ class Strategy(event_handler.EventHandler):
 
     def get_totalpnl(self, identifier = None):
         """Returns realized + unrealized PNL.
-        
+
         Returns credit - debit + open value.
         Realized and unrealized PNL are not available separately
         because they depend on accounting methods.
@@ -891,7 +881,7 @@ class Strategy(event_handler.EventHandler):
 
     def to_child(self, child, message):
         """Sends a message to a child.
-        
+
         Args:
             child (str or bytes): The identifier of the child. Can be one of the following:
                 - Child symbol as string
@@ -939,7 +929,7 @@ class Strategy(event_handler.EventHandler):
                 'MESSAGE' field of the communication event with the default parameters.
                 If a dict is provided, the message will be padded with the default communication
                 event parameters.
-        """        
+        """
         # default message details
         default_params = {c.EVENT_TYPE: c.COMMUNICATION, c.EVENT_SUBTYPE: c.INFO, c.EVENT_TS: self.clock}
         communication_params = {c.SENDER_ID: self.strategy_id, c.RECEIVER_ID: self.parent}
@@ -1207,7 +1197,7 @@ class Strategy(event_handler.EventHandler):
 
     def deny_order(self, order):
         """Denies the request to place an order.
-        
+
         Sends the denied order to the child.
         """
         order = order.update(event_subtype = c.DENIED)
@@ -1262,10 +1252,10 @@ class Strategy(event_handler.EventHandler):
             agg (str, optional): The level to aggregate to. If provided, must be one of ['OWNER', 'SYMBOL'].
                 If None, each position's equity curve will be returned as separate columns. Defaults to None.
             use_float (bool, optional): Whether to convert the returned dataframe values to float. Defaults to False.
-        
+
         Returns:
             pd.DataFrame: The equity curves of positions/symbols/strategies as columns of a dataframe, indexed by timestamp.
-        """        
+        """
 
         # If data is not provided, use self.datas
         if data is None:
@@ -1333,5 +1323,3 @@ class RMS(abc.ABC):
     def request_order_approval(self, position = None, order = None):
         """approve or deny the request to place an order. Default True"""
         return True
-
-

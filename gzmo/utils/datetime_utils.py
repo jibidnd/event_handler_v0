@@ -5,10 +5,15 @@ import pytz
 from . import constants as c
 
 def generate_days(start, end, step_in_days):
-    '''
-    start and end can be either datetime.datetime instances or string of yyyy-mm-dd format.
-    Retunrs list of dates as datetime.datetime instances
-    '''
+    """Generates a list of datetime.datetimes between `start` and `end` by `step_in_days`.
+    
+    Args:
+        start (datetime.datetime or str): If string, must be of yyyy-mm-dd format.
+        end (datetime.datetime or str): If string, must be of yyyy-mm-dd format.
+        step_in_days (int): The desired number of days between each day in the resulting list.
+    Returns
+        list[datetime.datetime]
+    """
     if isinstance(start, str):
         start = datetime.datetime.strptime(start, '%Y-%m-%d')
     if isinstance(end, str):
@@ -19,18 +24,36 @@ def generate_days(start, end, step_in_days):
     return dates
 
 def unix2datetime(unix_timestamp, from_tz = pytz.timezone('UTC'), to_tz = pytz.timezone('America/New_York')):
-    '''
-    Converts a unix timestamp @ tz in resolution to a datetime.datetime object
-    '''
+    """Converts a unix timestamp at `from_tz` to a datetime.datetime object at `to_tz`.
+
+    Args:
+        unix_timestamp (int): A unix timestamp.
+        from_tz (pytz.timezone, optional): The timezone of the unix timestamp before conversion.
+            Defaults to UTC.
+        to_tz (pytz.timezone, optional): The target timezone of the resulting datetime.
+            Defaults to America/New_York.
+    """
     return datetime.datetime.fromtimestamp(unix_timestamp, tz = from_tz).astimezone(to_tz)
 
 
 def unix2num(unix_timestamp, tz = pytz.timezone('UTC'), resolution = 'milliseconds'):
-    """
+    """Converts a unix timestamp to UTC float days.
+
     Convert a unix timestamp (with specified resolution) to the Gregorian
     date as UTC float days, preserving hours, minutes, seconds, microseconds,
     and nanoseconds.
-    Return value is a :func:`float`.
+    
+    Args:
+        unix_timestamp (float): A unix timestamp.
+        tz (pytz.timezone): The timezone of the unix timestamp. Defaults to UTC.
+        resolution (str): The resolution of the timestamp. Supported values are:
+            - seconds
+            - milliseconds
+            - microseconds
+            - nanoseconds
+    
+    Returns:
+        float: The gregorian date as UTC float days.
     """
     # First convert to second resolution and get nanosecond portion, if any
     nanoseconds = 0
@@ -71,22 +94,27 @@ def unix2num(unix_timestamp, tz = pytz.timezone('UTC'), resolution = 'millisecon
 
 
 def duration_to_sec(duration):
-    '''
-        Resolution following ISO 8601 duration
-        https://www.cmegroup.com/education/courses/introduction-to-futures/understanding-contract-trading-codes.html
-            - Y: Year
-            - M: Month
-            - W: Week
-            - D: Day
-            - h: hour
-            - m: minute
-            - s: second
-            - ms: millisecond
-            - us: microsecond
-            - ns: nanosecond
-        
-        Durations over weeks are not exact.
-    '''
+    """Converts a duration to number of seconds.
+
+    Note that durations over weeks are not exact.
+
+    Args:
+        duration (str): Resolution following ISO 8601 duration
+            https://www.cmegroup.com/education/courses/introduction-to-futures/understanding-contract-trading-codes.html
+                - Y: Year
+                - M: Month
+                - W: Week
+                - D: Day
+                - h: hour
+                - m: minute
+                - s: second
+                - ms: millisecond
+                - us: microsecond
+                - ns: nanosecond
+            
+    Returns:
+        float: number of seconds in one `duration`.
+    """
     duration = str(duration)
     if duration == 'ns':
         return 10.0e-9
@@ -108,17 +136,3 @@ def duration_to_sec(duration):
         return 60.0 * 60.0 * 24.0 * 7 * 30.25
     elif duration == 'Y':
         return 60.0 * 60.0 * 24.0 * 7 * 365.25
-
-
-# msgpack logic:
-#     packing:
-#         if object in handled types:
-#             pack using msgpack logic
-#         else:
-#             use passed default packer
-#     unpacking:
-#         if object in handled types:
-#             unpacking using msgpack logic
-#         elif object is ext_type:
-#             use passed ext_hook
-
