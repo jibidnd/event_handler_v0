@@ -1,10 +1,7 @@
-'''
-A session coordinates instances of events, brokers, and strategies.
-'''
+"""A session coordinates instances of events, brokers, and strategies."""
+
 from collections import deque
 import threading
-import queue
-import operator
 import time
 import zmq
 
@@ -13,9 +10,70 @@ from .utils import constants as c
 from .datafeeds.datafeed_synchronizer import DatafeedSynchronizer
 
 class Session:
-    def __init__(self, socket_mode = None):
+    """The Session sets up any necessary infrastructure for strategies/datafeeds/brokers
+        to run, and to communicate with each other. It can be used for both backtesting
+        and live trading.
 
-        self.socket_mode = socket_mode
+        Modular design
+        ==============
+        Strategies, datafeeds, and brokers are designed to be modular. The interfaces to
+        interact with them are consistent, so they can be switched out for other instances
+        easily. For example, to switch from a broker simulator to a live broker, simply
+        remove the simulator from the session, and add the live broker.
+
+            >>> session.brokers.pop('simulator_name')
+            >>> session.brokers['live_broker_name'] = live_broker
+        
+        Socket modes
+        ============
+        Communication between strategies, datafeeds, and brokers can be done in one of a few different ways,
+        from passing python variables to each other within the same program, to communicating via ZMQ
+        sockets as different standalone programs running on different machines. All of these are possible
+        with the Session class by sepcifying a socket mode. A few socket modes are available, as described below:
+            ALL:
+                All communication is done via ZMQ sockets.
+                - The `publish` method of each datafeed is called in a separate thread,
+                    and each datafeed publishes independently to the session's pub_sub_proxy,
+                    which relays messages in an unsynced manner.
+                - The `run` method of each broker is called in a separate thread,
+                    and each broker communicates with strategies via the session's broker_proxy,
+                    which relays messges in an unsynced manner.
+                - Strategies send/receive events via their respective ZMQ sockets.
+            STRATEGIES_FULL:
+                Strategies interact with ZQM sockets (both among strategies and with datafeed/brokers); datafeed and brokers do not.
+                - The `fetch` method of each datafeed is called in the main thread.
+                    Data events are consolidated and synced before being sent out from the session's data socket.
+                - The `take_order` and `try_fill_with_data` methods of each broker is called in the main thread.
+                    Order events are consolidated and synced before being relayed through the session's order socket.
+                - The behaviour of strategies is the same as if `socket_mode` = c.ALL.
+            STRATEGIES_INTERNALONLY:
+                Only inter-strategy communications are done via ZMQ sockets.
+                - Strategies continue to communicate among themselves via sockets
+                - All communications from the session to strategies, order or data, will be directly handled via the `_handle_event` method
+                    of the strategies.
+            NONE:
+                Sockets are not used.
+                - Events (data, order, communication) are queued and methods from parties are called directly to handle those events.
+                - Events are handled in a synced manner.
+                - Strategies will send communication and orders to a queue, which will then be processed accordingly.
+                - Between data events, any actions started by any communication (including subsequent communication) will be resolved completely
+            Defaults to NONE.
+
+        Examples:
+
+            >>> strat = gzmo.Strategy(name = 'example_strat')
+            >>> datafeed_aapl = gzmo.SnowflakeDataFeed(topic = 'AAPL', query = ...)
+            >>> sesh = gzmo.Session()
+            >>> sesh.add_datafeed(datafeed_aapl)
+            >>> sesh.add_strategy(strat)
+            >>> sesh.run()
+    """
+
+    def __init__(self):
+        """Inits the session instance.
+        
+        Strategies, datafeeds, and brokers can be added via the `add_...` methods.
+        """
 
         # Use one context for all communication (thread safe)
         self.zmq_context = zmq.Context()
@@ -60,32 +118,9 @@ class Session:
         self.main_shutdown_flag = threading.Event()
     
     def run(self, socket_mode = c.NONE):
-        """Whether/how to use sockets for this session.
-
-        Args:
-            socket_mode (str, optional): Whether to use sockets.
-                If ALL:
-                    - The `publish` method of each datafeed is called in a separate thread,
-                        and each datafeed publish independently to the session's pub_sub_proxy,
-                        which relays messages in an unsynced manner.
-                    - The `run` method of each broker is called in a separate thread,
-                        and each broker communicates with strategies via the session's broker_proxy,
-                        which relays messges in an unsynced manner.
-                    - Strategies send/receive events via their respectiv ZMQ sockets.
-                If STRATEGIES_FULL:
-                    - The `fetch` method of each datafeed is called in the main thread.
-                        Data events are consolidated and synced before being sent out from the session's data socket.
-                    - The `take_order` and `try_fill_with_data` methods of each broker is called in the main thread.
-                        Order events are consolidated and synced before being relayed through the session's order socket.
-                    - The behaviour of strategies is the same as if `socket_mode` = c.ALL.
-                If STRATEGIES_INTERNALONLY:
-                    - Strategies continue to communicate among themselves via sockets
-                    - All communications from the session to strategies, order or data, will be directly handled via the `_handle_event` method
-                        of the strategies.
-                If NONE:
-                    - Strategies will send communication and orders to a queue, which will then be processed accordingly.
-                    - Between data events, any actions started by any communication (including subsequent communication) will be resolved completely
-                Defaults to NONE.
+        """Sets up infrastructure and runs the strategies.
+        
+        See __init__ docstring for documentation on socket_mode.
         """
 
         self.socket_mode = socket_mode
@@ -110,23 +145,24 @@ class Session:
         return
 
     def add_strategy(self, strategy):
-        '''add strategies to the session
-            Note that all child strategies should be added to the session as well.
-        '''
+        """Adds a strategy to the session.
+            Note that any child strategies should be added to the session as well.
+        """
         self.strategies[strategy.strategy_id] = strategy
     
     def add_datafeed(self, datafeed):
-        '''add data feeds'''
+        """Adds data feeds to the session."""
         self.datafeeds.append(datafeed)
 
     def add_broker(self, broker):
-        '''add a broker to the session'''
+        """Adds a broker to the session."""
         self.brokers[broker.name] = broker
 
     def setup_addresses(self, socket_mode):
+        """Obtain free tcp addresses for setting up sockets."""
 
         # addresses to avoid
-        # want to avoid taking datafeed_publisher_address (it is "free" right now because it's been released by get_free_tcp_address)
+        # want to avoid taking other sockets' addresses.
         # inproc was found to be rather unstable for some reason, so we stick with tcp.
         addresses_used = []
 
@@ -183,6 +219,11 @@ class Session:
         return
 
     def setup_proxies(self, socket_mode):
+        """Sets up proxies to relay data, orders, and communications.
+        
+        The session can have multiple datafeeds or brokers. All should connect
+        to the proxies so intermediate handling of data/order events can be done.
+        """
 
         # clear proxies
         self.proxy_threads = []
@@ -213,6 +254,17 @@ class Session:
         return
 
     def setup_datafeeds(self, socket_mode):
+        """Sets up the datafeeds for the different socket_modes.
+
+        Sets up the datafeeds so that they know how to emit the data.
+        If socket_mode is ALL, all datafeeds are set to publish to an address in an
+            unsynced manner. Datafeeds are started when this method is called,
+            but a start_sync flag is in place so that the datafeeds do not start publishing
+            until the flag is set (in self.start).
+        If socket_mode is STRATEGIES_FULL, STRATEGIES_INTERNALONLY, or NONE,
+            all strategies will be combined into a synced datafeed via DatafeedSynchronizer,
+            and data events will be `fetch`ed from the synced datafeed.
+        """        
 
         if socket_mode == c.ALL:
             # set up the datafeeds for publishing
@@ -259,7 +311,16 @@ class Session:
         return
 
     def setup_brokers(self, socket_mode):
-        
+        """Sets up brokers for the different socket_modes.
+
+        If socket_mode is ALL, the brokers will connect to an order socket and/or
+            a datasocket.
+        If socket_mode is STRATEGIES_FULL, the session will set up a "broker socket"
+            for strategies to connect to, but the brokers will not be connecting
+            to a socket.
+        If socket_mode is STRATEGIES_INTERNALONLY or NONE, events are handled by
+            directly calling the brokers' methods, so no sockets are needed.
+        """
 
         # If running in full socket mode, set up the brokers
         if socket_mode == c.ALL:
@@ -290,7 +351,18 @@ class Session:
         return
 
     def setup_strategies(self, socket_mode):
-
+        """Sets up strategies for the different socket_modes.
+        
+        If socket_mode is ALL or STRATEGIES_FULL, all of the strategies' communication
+            with the outside world are through ZMQ sockets.
+        If socket_mode is STRATEGIES_INTERNALONLY, the strategies communicate with other
+            strategies via ZMQ sockets, but handle events by having the corresponding
+            methods directly called.
+        If socket_mode is NONE, the session creates socket emulators so that any outbound
+            communication from the strategies will still have the same interface as if they
+            were sent to ZMQ sockets.
+        
+        """
         for strategy in self.strategies.values():
             strategy.zmq_context = self.zmq_context
             strategy.shutdown_flag = self.main_shutdown_flag
@@ -334,7 +406,16 @@ class Session:
         return
 
     def start(self):
+        """Runs things that need to happen at the start of a backtest/live session.
         
+        If socket_mode is ALL, a sync flag `datafeed_start_sync` is set so that all datafeeds
+            start publishing at the same time.
+        If socket_mode is STRATEGIES_FULL, STRATEGIES_INTERNALONLY, or NONE, any existing communications
+            are handled before the event loop is started. This may include parent-child set-ups, passing
+            cash, etc.
+        
+        
+        """
         for strategy in self.strategies.values():
             strategy.start()
 
@@ -369,7 +450,8 @@ class Session:
             raise NotImplementedError(f'socket_mode {self.socket_mode} not implemented')
 
     def shutdown(self, linger = 0.1):
-        # exiting gracefully
+        """Exits gracefully."""
+
         self.main_shutdown_flag.set()
 
         # close the sockets, if any
@@ -390,16 +472,16 @@ class Session:
         self.zmq_context.destroy()
     
     def process_events(self, socket_mode):
-        '''
-            This is equivalent to pausing time to process all orders.
-            - router socket to strategies
-            - publish socket to strategies
-            - continuous loop:
-                - broker handle orders from strategies; send any response
-                - get data
-                - send data
-                - broker handle data; send any response
-        '''
+        """Performs the main event loop in a synced manner.
+
+        A method for socket_mode in ['STRATEGIES_FULL', 'STRATEGIES_INTERNALONLY', 'NONE'].
+
+        The event loop is as follows:
+            - broker handle orders from strategies; send any response
+            - get data
+            - send data
+            - broker handle data; send any response
+        """
         # check socket type
         if socket_mode == c.ALL:
             raise NotImplementedError('socket_mode = "ALL" is not implemented in process_events.')
@@ -525,13 +607,14 @@ class Session:
 
 
 def pub_sub_proxy(address_in, address_out, capture = None, context = None, shutdown_flag = None):
-    '''
-        Relays messages from backend (address_in) to frontend (address_out),
-        so strategies can have one central place to subscribe data from.
+    """Relays messages from backend (address_in) to frontend (address_out).
+        
+        This is to cosolidate datafeeds so that strategies can have one central place to
+        subscribe data from, and it is easier for the session to keep track of addresses.
 
         Note that we are binding on the subscriber end because we have a
         multiple publisher (datafeeds) - one subscriber (session) pattern
-    '''
+    """
 
     context = context or zmq.Context.instance()
 
@@ -570,28 +653,30 @@ def pub_sub_proxy(address_in, address_out, capture = None, context = None, shutd
 
 
 def broker_proxy(address_frontend, address_backend, capture = None, context = None, shutdown_flag = None, default_broker = None):
-    '''broker of brokers
+    """Relays orders to the correct brokers/strategies.
+
+        This is a broker of brokers that manages sender and receiver identities.
     
         The flow or order is as follow:
 
-        strategy: dealer: sends order
+        strategy (dealer): sends order
 
-        proxy: router: receives (strategy ident, order)
+        proxy (router): receives (strategy ident, order)
         proxy extracts broker name from order
         proxy adds the field SENDER_ID to the order
-        proxy: router: sends (broker ident, order)
+        proxy (router): sends (broker ident, order)
 
-        broker: dealer: receives order
+        broker (dealer): receives order
         broker processes order
-        broker: dealer: sends back order
+        broker (dealer): sends back order
 
-        proxy: router receives (broker ident, order)
+        proxy (router): receives (broker ident, order)
         proxy extract sender ident from order
-        proxy: router sends (strategy ident, order)
+        proxy (router): sends (strategy ident, order)
 
-        strategy: dealer: receives order
+        strategy (dealer): receives order
     
-    '''
+    """
     context = context or zmq.Context.instance()
 
     # establish strategy facing socket
@@ -651,7 +736,7 @@ def broker_proxy(address_frontend, address_backend, capture = None, context = No
         backend.close(linger = 10)
 
 def communication_proxy(address, capture = None, context = None, shutdown_flag = None):
-    '''Proxy to facilitate inter-strategy communication.
+    """Proxy to facilitate inter-strategy communication.
         
         Instead of each parent having their own address that children can connect to,
             all strategies will connect to a proxy socket that relays messages between
@@ -671,7 +756,7 @@ def communication_proxy(address, capture = None, context = None, shutdown_flag =
             c.MESSAGE: "xxxx..."
         }
 
-    '''
+    """
     context = context or zmq.Context.instance()
 
     message_router = context.socket(zmq.ROUTER)

@@ -161,8 +161,8 @@ class event:
 
     @staticmethod
     def order_event(dict_order_details = {}):
-        """
-        Create an order with default arguments.
+        """Create an order with default arguments.
+        
         See constants.py for event_subtypes for orders.
         """
         order = {
@@ -191,21 +191,6 @@ class event:
         order.update(**dict_order_details)
 
         return order
-    
-    # @staticmethod
-    # def cashflow_order(amount, **dict_order_details):
-    #     """Create an order event for deposit/withdrawal of cash.
-
-    #     Args:
-    #         amount (numeric): amount of cash to add (negative for withdrawals).
-    #     """
-    #     o = order_event({
-    #         c.SYMBOL: c.CASH,
-    #         c.CREDIT: max(amount, 0),
-    #         c.DEBIT: min(amount, 0),
-    #         c.NET: amount
-    #         }).update(**dict_order_details)
-    #     return o
 
     @staticmethod
     def data_event(dict_data_details = {}):
