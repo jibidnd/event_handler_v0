@@ -1,7 +1,8 @@
-# CONSTANTS
+"""Constants (strings) as variables.
+Like enums but better.
+"""
 
 # scope
-STRATEGY = 'STRATEGY'
 TRADE = 'TRADE'
 POSITION = 'POSITION'
 
@@ -10,7 +11,7 @@ DATA_SOCKET = 'DATA_SOCKET'
 ORDER_SOCKET = 'ORDER_SOCKET'
 COMMUNICATION_SOCKET = 'COMMUNICATION_SOCKET'
 
-# statuses 
+# order / position statuses 
 OPEN = 'OPEN'
 CLOSED = 'CLOSED'
 PENDING = 'PENDING'
@@ -38,7 +39,7 @@ MARKET = 'MARKET'
 LIMIT = 'LIMIT'
 CANCELLATION = 'CANCELLATION'
 
-# event_type
+# event_types
 DATA = 'DATA'
 ORDER = 'ORDER'
 COMMUNICATION = 'COMMUNICATION'
@@ -49,14 +50,13 @@ BAR = 'BAR'
 QUOTE = 'QUOTE'
 SIGNAL = 'SIGNAL'
 INFO = 'INFO'
-# STRATEGY = 'STRATEGY'
 
 # Bar attributes
 MULTIPLIER = 'MULTIPLIER'
 RESOLUTION = 'RESOLUTION'
-LEFT = 'LEFT'
-CENTER = 'CENTER'
-RIGHT = 'RIGHT'
+LEFT = 'LEFT'                   # Alignment
+CENTER = 'CENTER'               # Alignment
+RIGHT = 'RIGHT'                 # Alignment
 
 # event_subtype for COMMUNICATION
 INFO = 'INFO'
@@ -69,11 +69,11 @@ KWARGS = 'KWARGS'
 # TOPIC = 'TOPIC'
 
 # Event directions
-UP = 'UP'
-DOWN = 'DOWN'
+UP = 'UP'                       # towards the parents
+DOWN = 'DOWN'                   # towards the children
 
 # datalines
-# OPEN = 'OPEN'
+OPEN = 'OPEN'
 HIGH = 'HIGH'
 LOW = 'LOW'
 CLOSE = 'CLOSE'
@@ -81,13 +81,12 @@ TOPIC = 'TOPIC'
 VOLUME = 'VOLUME'
 
 # Asset classes
-# STRATEGY = 'STRATEGY'
 ASSET_CLASS = 'ASSET_CLASS'
 CASH = 'CASH'
 EQUITY = 'EQUITY'
-# STRATEGY = 'STRATEGY'
+STRATEGY = 'STRATEGY'
 
-'''
+"""
 general naming conventions
 # <symbol>[optaional: _<int multiplier>][optional: _<str resolution following ISO 8601 duration>]
     https://www.cmegroup.com/education/courses/introduction-to-futures/understanding-contract-trading-codes.html
@@ -130,7 +129,7 @@ futures naming coventions:
         October - V
         November -X
         December -Z
-'''
+"""
 
 
 # Strategy / Position attributes
@@ -164,7 +163,6 @@ BROKER = 'BROKER'
 # incremental
 CREDIT = 'CREDIT'
 DEBIT = 'DEBIT'
-# NET = 'NET'
 COMMISSION = 'COMMISSION'
 QUANTITY_FILLED = 'QUANTITY_FILLED'
 AVERAGE_PRICE = 'AVERAGE_PRICE'
@@ -183,3 +181,16 @@ ALL = 'ALL'
 STRATEGIES_FULL = 'STRATEGIES_FULL'
 STRATEGIES_INTERNALONLY = 'STRATEGIES_INTERNALONLY'
 NONE = 'NONE'
+
+#======================================================================================================================
+# Useful constants
+#======================================================================================================================
+HOURS_PER_DAY = 24.0
+MINUTES_PER_HOUR = 60.0
+SECONDS_PER_MINUTE = 60.0
+MUSECONDS_PER_SECOND = 1e6
+NANOSECONDS_PER_SECOND = 1e9
+MINUTES_PER_DAY = MINUTES_PER_HOUR * HOURS_PER_DAY
+SECONDS_PER_DAY = SECONDS_PER_MINUTE * MINUTES_PER_DAY
+MUSECONDS_PER_DAY = MUSECONDS_PER_SECOND * SECONDS_PER_DAY
+NANOSECONDS_PER_DAY = NANOSECONDS_PER_SECOND * SECONDS_PER_DAY

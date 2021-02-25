@@ -1,18 +1,16 @@
-import threading
-
-import zmq
 import decimal
 
-from ..data import *
-from .. import constants as c
+import zmq
+
+from . import BaseDataFeed
 from .. import utils
-from core import data
+from ..utils import constants as c
+
 
 class DatafeedCompressor(BaseDataFeed):
     
     def __init__(self, datafeed, compressor, zmq_context = None):
-        """
-            Takes a datafeed and combine multiple data points into one.
+        """Takes a datafeed and combine multiple data points into one.
 
         Args:
             datafeed (iterable): Datafeed to compress.
@@ -28,11 +26,27 @@ class DatafeedCompressor(BaseDataFeed):
         
 
     def execute_query(self):
+        """Execute the query and get ready to emit data."""      
         self.datafeed.execute_query()
         self.from_beginning = False
 
     def fetch(self, limit = 1):
+        """Return the requested number of records.
 
+            `limit` records will be returned. If limit == 1, a dictionary of a single record
+                will be returned. If limit > 1, a list of dictionaries will be returned. The keys
+                of the dictionaries will be the column names, and the values will be the record values.
+            
+            If self.from_beginning is True (as it is set when the datafeed is instantiated),
+            the query will be executed when this method is called.
+
+
+        Args:
+            limit (int, optional): The number of records to return. Defaults to 1.
+
+        Returns:
+            list[dict] or dict: The queried data as record(s).
+        """    
         # If need to get results from scratch
         if self.from_beginning:
             self.execute_query()
@@ -57,41 +71,6 @@ class DatafeedCompressor(BaseDataFeed):
             return results
         elif limit == 1:
             return results[0]
-
-
-    def publish(self):
-        # wait for the starting signal
-        self.start_sync.wait()
-
-        while (not self.main_shutdown_flag.is_set()) and \
-                (not self.shutdown_flag.is_set()) and \
-                (not self.is_finished):
-
-            # get the next event: (topic, event_msg)
-            if (event := self.fetch()) is not None:
-
-                try:
-                    event_packed = utils.packb(event)
-                    self.sock_out.send_multipart([event[c.TOPIC].encode(), event_packed], flag = zmq.NOBLOCK)
-                except zmq.ZMQError as exc:
-                    # Drop messages if queue is full
-                    if exc.errno == zmq.EAGAIN:
-                        pass
-                    else:
-                        self.shutdown()
-                        raise
-            else:
-                # no more events; shut down.
-                self.is_finished = True
-                self.shutdown()
-                break
-        
-        self.shutdown()
-
-    def shutdown(self):
-        self.shutdown_flag.set()
-        self.sock_out.close(linger = 10)
-
 
 class count_compressor:
     def __init__(self, target_count, combiner):

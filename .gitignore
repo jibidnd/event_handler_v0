@@ -4,6 +4,12 @@
 # Scratch work
 scratchwork/
 
+# VSCode files
+.vscode/
+
+# pychche files
+__pycache__/
+
 # Node artifact files
 node_modules/
 dist/

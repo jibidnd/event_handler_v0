@@ -1,8 +1,8 @@
-'''Strategies contain the business logic for making actions given events.'''
-
+"""A Strategy contains the business logic for making actions given events."""
 
 import abc
 import collections
+from os import posix_fadvise
 import uuid
 import decimal
 from collections import deque
@@ -11,6 +11,7 @@ import pytz
 import time
 import threading
 import copy
+import warnings
 
 import pandas as pd
 
@@ -25,6 +26,35 @@ from ..event_handler import event, lines
 from .. import utils
 
 class Strategy(event_handler.EventHandler):
+    """A Strategy contains the business logic for making actions given events.
+
+    The Strategy object is the center piece of any trading algorithm.
+    It serves the following functions:
+        - Keeps track of positions
+        - Keeps track of cash
+        - Defines action when given a piece of data
+        - Defines buy/sell logic
+        - Connects with brokers
+        - Connects with datafeeds
+        - Connects with a "command center"
+
+    (Not all attributes listed)
+    Attributes:
+        name
+        zmq_context
+        communication_address
+        data_address
+        order_address
+        logging_addresses
+        local_tz
+        params
+        parent
+        strategy_id
+        children
+        data_subscriptions
+        shares
+
+    """
     def __init__(self, name = None, zmq_context = None, communication_address = None,
                     data_address = None, order_address = None, logging_addresses = None,
                     data_subscriptions = None, params = None, rms = None, local_tz = 'America/New_York'):
@@ -78,9 +108,13 @@ class Strategy(event_handler.EventHandler):
         if self.logging_addresses is not None:
             for logging_address in logging_addresses:
                 self.connect_logging_socket(logging_address)
-        
-    def __str__(self):
 
+    def __str__(self):
+        """Summary of the Strategy as string representation.
+
+        Returns:
+            str: Summary of the Strategy.
+        """
         keys = ['name', 'params', 'parent', 'strategy_id', 'children', 'shares']
         d = {}
         for key in keys:
@@ -99,6 +133,11 @@ class Strategy(event_handler.EventHandler):
     # Communication stuff
     # ----------------------------------------------------------------------------------------------------
     def connect_communication_socket(self, communication_address):
+        """Connects a socket to the specified `communication_address`.
+
+        Args:
+            communication_address (str): A ZMQ address string in the form of 'protocol://interface:port’.
+        """
         # if new address, overwrite the current record
         self.communication_address = communication_address
         # Create a parent socket if none exists yet
@@ -109,6 +148,13 @@ class Strategy(event_handler.EventHandler):
         self.communication_socket.connect(communication_address)
 
     def connect_data_socket(self, data_address):
+        """Connects a ZMQ SUB socket to the specified `data_address`.
+
+        Also automatically subscribe to any topics in self.data_subscription.
+
+        Args:
+            data_address (str): A ZMQ address string in the form of 'protocol://interface:port’.
+        """
         # if new address, overwrite the current record
         self.data_address = data_address
         # Create a data socket if none exists yet
@@ -119,8 +165,13 @@ class Strategy(event_handler.EventHandler):
         for topic in self.data_subscriptions:
             self.subscribe_to_data(topic, track = (topic != self.strategy_id))
         self.data_socket.connect(data_address)
-        
+
     def connect_order_socket(self, order_address):
+        """Connects a ZMQ DEALER socket to the specified `order_address`.
+
+        Args:
+            order_address (str): A ZMQ address string in the form of 'protocol://interface:port’.
+        """
         # if new address, overwrite the current record
         self.order_address = order_address
         # Create a order socket if none exists yet
@@ -131,6 +182,11 @@ class Strategy(event_handler.EventHandler):
         self.order_socket.connect(order_address)
 
     def connect_logging_socket(self, logging_address):
+        """Connects a ZMQ DEALER socket to the specified `logging_address`.
+
+        Args:
+            logging_address (str): A ZMQ address string in the form of 'protocol://interface:port’.
+        """
         # if new address, add it to the list
         if logging_address not in self.logging_addresses:
             self.logging_addresses.append(logging_address)
@@ -140,15 +196,24 @@ class Strategy(event_handler.EventHandler):
             socket.setsockopt(zmq.IDENTITY, self.strategy_id.encode())
             self.logging_socket = socket
         self.logging_socket.conenct(logging_address)
-    
+
     def subscribe_to_data(self, topic, track = True, line_args = None, lazy = False):
-        '''
-            Topic subscriptions from the data socket.
-            If `lazy`, store topic and establish lines (if specified), but do not
-                subscribe to data on data socket. This is for when a subscription for
-                data occurs before binding to a socket (e.g. we don't know what socket
-                to bind to yet, like in the case of a session)
-        '''
+        """Subscribe to a data topic published to the data socket.
+
+        Args:
+            topic (str): The topic to the data will be published under.
+                Pass an empty string `''` to subscribe to all topics. If an empty string
+                is passed, `track` is ignored and data will not be tracked (unless
+                separately subscribed to).
+            track (bool, optional): If True, create lines to track the
+                data. If False, the Strategy will still receive the data,
+                handle it as usual, but will not store the data. Default True.
+            line_args (dict, optional): If `track` is True, the argumnts to set
+                up the datalines. See .strategy.lines for details. Default None.
+            lazy (bool, optional): If True, immediately `setsockopt` on the datasocket.
+                Set to False when subscription for data occurs before binding to a socket,
+                e.g. in the case of a session.
+        """
         if line_args is None:
             line_args = dict()
 
@@ -157,8 +222,8 @@ class Strategy(event_handler.EventHandler):
         topic = str(topic)
         if topic not in self.data_subscriptions:
             self.data_subscriptions |= set([topic])
-        
-        # establish lines if desired
+
+        # establish lines if tracked
         if track:
             # ignore wildcard subscriptions
             if topic == '':
@@ -170,7 +235,7 @@ class Strategy(event_handler.EventHandler):
                     # Create new lines if none exist yet
                 if line_args['symbol'] not in self.datas.keys():
                     self.datas[line_args['symbol']] = lines(**line_args)
-        
+
         # subscribe to data now if not lazy
         if not lazy:
             assert self.data_socket is not None, \
@@ -178,75 +243,107 @@ class Strategy(event_handler.EventHandler):
             self.data_socket.setsockopt(zmq.SUBSCRIBE, topic.encode())
         return
 
-    def add_parent(self, parent_strategy = None, parent_strategy_id = None):
-        """Add a child.
-        
-        Args:
-            parent_strategy (Strategy or supports .get): if provided, will be used to get parent_strategy_id.
-            parent_strategy_id (str): The strategy_id to identify the parent by. If None, must be provided by child_strategy.
-        """
-        # if child_strategy is provided, attempt to get these information
-        if parent_strategy is not None:
-            parent_strategy_id = parent_strategy.get(c.STRATEGY_ID)
-        
-        assert (parent_strategy_id) is not None, 'Need strategy_id of parent being added.'
-        
-        self.parent = parent_strategy_id
+    def add_parent(self, parent_strategy = None):
+        """Adds a parent.
 
-        # TODO: to have parent load open positions, do:
-        # - child.add_parent
-        # - parent.add_child
-        # - child.to_parent(command({REQUEST: load_openpositions, MESSAGE: child.get_openpositionsummary}))
-        # - (parent should handle communication)
+        The child must know the parent's strategy_id. Either pass an object that supports
+        calling .get('STRATEGY_ID') or directly pass the parent's strategy_id as a string.
+
+        To create a parent-child relationship, both the child and the parent must add each other.
+
+        Example:
+            >>> # To create a parent-child relationship, do:
+            >>> child.add_parent(parent)
+            >>> parent.add_child(child)
+
+        Args:
+            parent_strategy (supports.get or str): If string, the parent's strategy_id. Otherwise
+                parent_strategy.get('STRATEGY_ID') will be called to get the parent's strategy_id.
+        """
+        if isinstance(parent_strategy, str):
+            self.parent = parent_strategy
+        else:
+            try:
+                parent_strategy_id = parent_strategy.get(c.STRATEGY_ID)
+            except:
+                raise
+            assert (parent_strategy_id) is not None, f'Cannot get strategy_id from {parent_strategy}'
+            self.parent = parent_strategy_id
 
         return
 
-    def add_child(self, symbol, child_strategy = None, child_strategy_id = None, child_update_freq = datetime.timedelta(seconds = 1)):
-        """Add a child.
-        
+    def add_child(self, symbol, child_strategy):
+        """Adds a child.
+
+        All of the child's information (the child's positions, cash balance, etc) are also tracked by the parent.
+        To do so, the parent must know the child's positions at the time the child is added.
+        Thus, the child must either be passed directly as a Strategy object (to support .get_openpositionsummary())
+        or be a Strategy connected through the communication socket.
+
         Args:
-            symbol (str): name of the child. Must be unique in the strategy across the set of all symbols (i.e. including tickers).
-            child_strategy (Strategy): if provided, will be used to get child_strategy_id and current open positions.
-            child_strategy_id (str): The strategy_id to identify the (existing) child by. If None, must be provided by child_strategy.
-            child_update_freq (datetime.timedelta): How often the child's mark should be updated.
-                                                    To update constantly (each _prenext), set to <0.
+            symbol (str): The symbol under which to track the child. Since the child strategy is essentially
+                tracked like a ticker, the symbol must be unique in the (parent) strategy across the set of all symbols
+                among all assets.
+            child_strategy (Strategy, dict, or None): Used to get the child's strategy_id and current open positions.
+                If a Strategy object is provided, `add_parent` and `get_openpositionsummary` will be called on the child
+                    Strategy.
+                If a dict is provided, must have keys `STRATEGY_ID' and 'openpositionsummary'. `add_parent` method is remotely
+                    called via the communication channel to finish establishing the relationship but is not verified.
+                If a string is provided, records it as the child's strategy_id, and `add_parent` and `get_openpositionsummary`
+                    will be called via the communication channel in a separate thread. The parent will wait up to 5 seconds for
+                    the open position summary information to arrive before throwing an Exception.
         """
-        # if child_strategy is provided, attempt to get these information
-        if child_strategy is not None:
-            child_strategy_id = child_strategy.get(c.STRATEGY_ID)
+        if isinstance(child_strategy, self.__class__.__bases__):
+            # Establish the relationship
+            child_strategy.add_parent(self.strategy_id) # all orders are not routed through the parent
+            # Create the child positions
+            child_strategy_id = child_strategy.strategy_id
+            # Add a position for the child strategy
+            self.create_position(symbol, asset_class = c.STRATEGY)
+            self.children[symbol] = child_strategy_id
+            openpositionsummary = child_strategy_id.get_openpositionsummary()
+            self.load_openpositions(openpositionsummary)
 
-        assert (child_strategy_id) is not None, 'Need strategy_id of child being added.'
-        
-        # Add the child
-        self.children[symbol] = child_strategy_id
+        elif isinstance(child_strategy, dict):
+            # Get info
+            child_strategy_id = child_strategy[c.STRATEGY_ID]
+            openpositionsummary = child_strategy['openpositionsummary']
+            # Add a position for the child strategy
+            self.create_position(symbol, asset_class = c.STRATEGY)
+            self.children[symbol] = child_strategy_id
+            self.load_openpositions(openpositionsummary)
+            # child must `add_parent` to finish establishing the relationship
+            self.to_child(symbol, {c.TOPIC: 'add_parent', c.MESSAGE: 'add_parent', c.KWARGS: self.strategy_id})
+            warnings.warn('Verify that the child as called `add_parent` to confirm relationship is established.')
 
-        # Add a position for the child strategy
-        self.create_position(symbol, asset_class = c.STRATEGY)
-
-        # open position summary should be provided as either
-        # - an element in dictionary if child_strategy is a dictionary
-        # - get_openpositionsummary if child_strategy is a strategy
-        # - via the communication channel (i.e. for a remote child add by strategy_id only, the communication channel must already be running)
-        openpositionsummary = None
-        try:
-            openpositionsummary = child_strategy.get_openpositionsummary()
-        except AttributeError:
-            try:
-                openpositionsummary = child_strategy.get('openpositionsummary')
-            except:
-                if self.communication_socket is not None:
-                    self.to_child(symbol, {c.TOPIC: 'openpositionsummary', c.MESSAGE: 'get_openpositionsummary'})
+        elif isinstance(child_strategy, str):
+            self.children[symbol] = child_strategy
+            # remotely add the child
+            self.to_child(symbol, {c.TOPIC: 'add_parent', c.MESSAGE: 'add_parent', c.KWARGS: self.strategy_id})
+            self.to_child(symbol, {c.TOPIC: 'openpositionsummary', c.MESSAGE: 'get_openpositionsummary'})
+            # Check for a cash position to verify that the child's positions have been loaded.
+            child_positions_loaded = False
+            for i in range(5):
+                child_cash_positions = [pos for pos in self.open_positions.values() if pos.owner == symbol and pos.asset_class == c.CASH]
+                if len(child_cash_positions) > 0:
+                    child_positions_loaded = True
                 else:
-                    raise Exception(f'Unable to get open position summary for child {symbol}')
-
-        self.load_openpositions(openpositionsummary)
-
+                    time.sleep(1)
+            if not child_positions_loaded:
+                raise Exception('Unable to load child positions')
         return
 
     def add_cash(self, amount):
-        '''Adds cash to the cash position by creating a "filled" order event.
-            `amount` is net change of cash to self.
-        '''
+        """Adds cash.
+
+        Cash is added by creating a "filled" order event (and hence the transaction will not have any 'REQUESTED' counterparts).
+        The shares are diluted so that the mark of the strategy is not changed by adding cash.
+
+        Args:
+            amount (numeric): The net desired change in cash to self. Pass a negative amount to indicate withdrawal of cash.
+                The amount is automatically converted to decimal.
+        """
+        amount = decimal.Decimal(amount)
         nav_0 = self.get_nav()
 
         cash = {
@@ -271,31 +368,37 @@ class Strategy(event_handler.EventHandler):
     # ----------------------------------------------------------------------------------------------------
     # Session stuff
     # ----------------------------------------------------------------------------------------------------
-    
-    def before_start(self):
-        '''Things to be run before start'''
-        pass
-
     def start(self):
-        '''Initialization. Things to be run before starting to handle events.'''
-        self.before_start()
+        """Things to be run before starting to handle events."""
         return
-    
-    def run(self, shutdown_flag = None):
-        '''Main event loop. The session should call this.
-        
-            At any time, the strategy will have visibility of the next event from each socket:
-                Data, order, communication; as stored in next_events.
-                If any of these slots are empty, the strategy will make 1 attempt to receive data
-                from the corresponding sockets.
-            
-                Then, the events in next_events will be sorted by event_ts, and the very next
-                event will be handled.
 
-                The logic then resets and loops forever.
-        '''   
+    def run(self, shutdown_flag = None):
+        """Main event loop to handle events from sockets.
+
+        The main event loop continuously checks for events from the communication, data,
+            and order sockets and handles them.
+
+        At any time, the strategy will have visibility of the next event from each socket:
+        Data, order, communication; as stored in next_events.
+        If any of these slots are empty, the strategy will make 1 attempt to receive data
+        from the corresponding socket.
+
+        Then, the events in next_events will be sorted by event_ts, and the very next
+        event will be handled.
+
+        The logic then resets and loops forever.
+
+        The logic is roughly as follow:
+            - Populate next communication event
+            - Populate next data event
+            - Populate next order event
+            - Sort the next communication, data, and order events by EVENT_TS
+            - Handle the earliest of the 3 events
+            - Loop
+
+        """
         # TODO: what if we lag behind in processing? how do we catch up?
-        
+
         if shutdown_flag is None:
             shutdown_flag = self.shutdown_flag
             shutdown_flag.clear()
@@ -313,6 +416,7 @@ class Strategy(event_handler.EventHandler):
                                     [self.communication_socket, self.data_socket, self.order_socket]):
                 if socket is None: continue
                 if next_events.get(name) is None:
+                    self._prenext()
                     try:
                         # Attempt to receive from each socket, but do not block
                         if socket.socket_type in [zmq.SUB, zmq.ROUTER]:
@@ -329,21 +433,28 @@ class Strategy(event_handler.EventHandler):
                         else:
                             raise
 
-                
-            # Now we can sort the upcoming events and handle the next event
+
+            # Now we can sort the upcoming events and process the next event
             if len(next_events) > 0:
                 # Handle the socket with the next soonest event (by EVENT_TS)
                 # take the first item (socket name) of the first item ((socket name, event)) of the sorted queue
                 next_socket = sorted(next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
                 next_event = next_events.pop(next_socket)        # remove the event from next_events
-                self._handle_event(next_event)
+                self._process_event(next_event)
 
-    def before_stop(self):
-        '''Prior to exiting. Gives user a chance to wrap things up and exit clean. To be overridden.'''
+    def _before_stop(self):
+        """Things to execute prior to exiting.
+
+        Gives user a chance to wrap things up and exit clean. To be overridden.
+        Called before `stop` is called.
+        """
         pass
 
-    def stop(self):
-        
+    def _stop(self):
+        """Exits clean.
+
+        Called after `before_stop` is called.
+        """
         self.before_stop()
 
         self.shutdown_flag.set()
@@ -357,17 +468,25 @@ class Strategy(event_handler.EventHandler):
 
         return
 
-    # ----------------------------------------------------------------------------------------------------
-    # Business logic go here
-    # The private methods perform default actions (e.g. passing an order, etc)
-    #   and calls the abstractmethods, which contain the business logic unique to the strategy.
-    # ----------------------------------------------------------------------------------------------------
-
-    def _prenext(self):
-        '''Prior to processing the next event'''
-        return self.prenext()
+    """
+    ----------------------------------------------------------------------------------------------------
+    Business logic go here
+    The private methods perform default actions (e.g. passing an order, etc)
+        and calls the abstractmethods, which contain the business logic unique to the strategy.
+    ----------------------------------------------------------------------------------------------------
+    """
 
     def _preprocess_event(self, event):
+        """Overrides parent method to handle event_ts.
+
+        Called before `preprocess_event`, which may be overridden.
+
+        Args:
+            event (dict): Event to be preprocessed.
+
+        Returns:
+            event: The preprocessed event.
+        """
         # preprocess received events prior to handling them
 
         # localize the event ts
@@ -377,21 +496,19 @@ class Strategy(event_handler.EventHandler):
         elif isinstance(event_ts, datetime.datetime):
             event_ts = event_ts.astimezone(self.local_tz)
         event[c.EVENT_TS] = event_ts
-        
+
         return self.preprocess_event(event)
 
-    def _handle_event(self, event):
-
-        # Run code that needs to be executed bofore handling any event
-        self._prenext()
+    def _process_event(self, event):
+        "Overrides the parent handle_event method to update clock."
 
         # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
         if (event_ts := event[c.EVENT_TS]) > self.clock.timestamp():
             self.clock = utils.unix2datetime(event_ts)
-        return super()._handle_event(event)
+        return super()._process_event(event)
 
-    def _handle_data(self, data):
-        '''Update lines in self.datas with data event'''
+    def _process_data(self, data):
+        """Updates lines in self.datas with data event."""
         try:
             symbol = data[c.SYMBOL]
         except KeyError:
@@ -402,11 +519,12 @@ class Strategy(event_handler.EventHandler):
         # If a line exists, update it
         if self.datas.get(symbol) is not None:
             self.datas[symbol].update_with_data(data)
-        return self.handle_data(data)
+        
+        self.process_data(data)
+        return
 
-    def _handle_order(self, order):
-        '''
-        Handle an order event.
+    def _process_order(self, order):
+        """Processes an order event.
 
         Two types of order events can happen here:
         1) A "pass through"
@@ -417,7 +535,7 @@ class Strategy(event_handler.EventHandler):
                 or if there are no parents, sent to the broker.
                 If the Strategy's RMS rejects the order, an ORDER event with event_subtype REJECTED
                 is published to the child that requested that order.
-            - 
+            -
         2) Result of a prior order sent
             - The strategy chain of the order has reached length 0
             - The cash of the strategy is updated accordingly
@@ -425,7 +543,7 @@ class Strategy(event_handler.EventHandler):
 
         This will be called 3*(#levels - 1) for each order, once for each of request, submitted, and filled.
         We should probably make this faster.
-        '''
+        """
         event_subtype = order.get(c.EVENT_SUBTYPE)
 
         # order on the way going "up"
@@ -448,9 +566,22 @@ class Strategy(event_handler.EventHandler):
             if len(order[c.STRATEGY_CHAIN]) != 0:
                 original_sender = order[c.STRATEGY_CHAIN].pop()
                 self.to_child(original_sender, order)
-        return self.handle_order(order)
         
-    def _handle_communication(self, communication):
+        self.process_order(order)
+        return
+
+    def _process_communication(self, communication):
+        """Processes a communication event.
+
+        If the communication is an attribute, respond to the sender with the value of the attribute.
+        If the communication is a method of the strategy, call the method and respond to the sender
+            with any returned values from the method.
+        If the communication is a response from a prior communication, actions must be specified
+            (e.g. openpositionsummary).
+
+        Args:
+            communication (event): The communication event.
+        """
         if communication[c.EVENT_SUBTYPE] == c.REQUEST:
 
             answer = getattr(self, communication[c.MESSAGE])
@@ -466,7 +597,7 @@ class Strategy(event_handler.EventHandler):
                 wrapped_answer = event.communication_event({c.EVENT_SUBTYPE: c.INFO, c.SYMBOL: self.strategy_id})
                 wrapped_answer.update({c.MESSAGE: {communication[c.MESSAGE]: answer}})
                 return self.to_parent(wrapped_answer)
-        
+
         elif communication[c.EVENT_SUBTYPE] == c.INFO:
             # handling info
             info = communication[c.MESSAGE]
@@ -475,43 +606,47 @@ class Strategy(event_handler.EventHandler):
                 self.load_openpositions(info)
         else:
             pass
-
+        
+        self.process_communication(communication)
         return
-
-    def prenext(self):
-        pass
-
-    @abc.abstractmethod
-    def handle_data(self, event):
-        pass
-
-    # @abc.abstractmethod
-    def handle_order(self, order):
-        pass
-
-    # @abc.abstractmethod
-    def handle_command(self, command_event):
-        pass
-
-
-    # ----------------------------------------------------------------------------------------------------
-    # Info things
-    # ----------------------------------------------------------------------------------------------------
+    
+    
+    """
+    ----------------------------------------------------------------------------------------------------
+    Info things
+    ----------------------------------------------------------------------------------------------------
+    """
     def get(self, identifier, obj_type = None):
-        """ `get`s an object from the strategy by the identifier.
-            The identifier could be a property/method name, a symbol with a corresponding lines object,
-            or a position with
-            If an id is provided, the method will look in the following order: 
-                self.open_trades, self.open_positions, self.closed_trades, self.closed_positions
+        """ `get`s an attribute from the strategy by the identifier.
+
+            The identifier could be a property/method name, a symbol, or an attribute or method name
+            of the Strategy.
+            If obj_type is not specified, the `get` method finds matches in the following order:
+                - Data
+                - Position
+                - Property or method
 
         Args:
-            identifier (str): The name of the object or an identifier of the object.
+            identifier (str): The name of the object or an identifier of the object. Can be one of the following:
+                - symbol of a dataline
+                - position_id of a position
+                - symbol of a position
+                - name of a property/method
+            obj_type (str, optional): One of ['DATA', 'POSITION', 'PROPERTY', 'METHOD'] or None.
+                Specifices the type of the object the user is looking for. If obj_type is None,
+                the `get` method finds matches in the following order:
+                    - Data
+                    - Position
+                    - Property or method
+
         """
         obj_type = (obj_type or '').upper()
 
+        # if looking for datalines
         if (obj_type == c.DATA) or (obj_type == ''):
             if (obj := self.datas.get(identifier)) is not None:
                 return obj
+        # if looking for a position
         if (obj_type == c.POSITION) or (obj_type == ''):
             if (position := (self.open_positions.get(identifier) or self.closed_positions.get(identifier))) is not None:
                 return position
@@ -535,43 +670,58 @@ class Strategy(event_handler.EventHandler):
                 except IndexError:
                     raise Exception(f'No attribute by the name of {identifier}')
             return answer
-        
+
         return
-    
+
     def get_nav(self, identifier = None):
-        # Get net asset value of a strategy / asset
+        """Returns the net asset value of an asset.
+
+        Args:
+            identifier (str, optional): Identifier of the asset. Can be a symbol
+                of a non-strategy asset, or the symbol of a child strategy. If None,
+                returns the NAV of the current Strategy. Defaults to None.
+
+        Returns:
+            The net asset value of the asset.
+        """
         nav = 0
+        # Get values of all non-strategy open positions of the strategy.
+        # This will include all assets owned by any child strategies.
         if identifier is None:
             for position in self.open_positions.values():
                 if position.asset_class != c.STRATEGY:
                     if position.quantity_open != 0:
                         nav += self.get_mark(position.symbol) * position.quantity_open
-            
+
         else:
+            # otherwise the identifier is one of two things:
+            # either a child strategy, or a non-strategy asset.
+            # If it is a strategy, sum up the values of all assets under that strategy,
+            # if it is a non-strategy asset, sum up the values of all positions under the specified symbol.
             for position in self.open_positions.values():
                 if (position.owner == identifier) or ((position.symbol == identifier) and (position.asset_class != c.STRATEGY)): # ??
                     if position.quantity_open != 0:
                         nav += self.get_mark(position.symbol) * position.quantity_open
         return nav
-    
+
     def get_ncf(self, identifier = None):
-        '''
-            Get the net cash flow caused by a position/strategy.
-            If identifier is None (default), gets the net cash flow caused
-            by the strategy to the account holding the strategy.
-        '''
+        """Returns the net cash flow caused  by a position/strategy.
+
+        Args:
+            identifier (str, optional): Identifier of the position. If None,
+                returns the net cash flow caused by the current strategy (w.r.t.
+                to the account holding the strategy).
+        """
         identifier = identifier or self.strategy_id
-        
+
         ncf = 0
         for position in self.open_positions.values():
             if (position.owner == identifier) or (position.symbol == identifier):
                 ncf += (position.credit - position.debit)
-                # if position.symbol == c.CASH:
-                #     ncf -= position.investment
         return ncf
 
     def get_mark(self, identifier = None):
-        """Get the mark of an asset
+        """Returns the mark of an asset.
 
         Args:
             asset (str): the name / identifier of the asset
@@ -602,21 +752,33 @@ class Strategy(event_handler.EventHandler):
                         break
                 assert position is not None, f'No positions with symbol {identifier}.'
                 shares = position.quantity_open
-            
+
             mark = nav / shares
 
             return mark
 
 
     def get_totalpnl(self, identifier = None):
+        """Returns realized + unrealized PNL.
 
+        Returns credit - debit + open value.
+        Realized and unrealized PNL are not available separately
+        because they depend on accounting methods.
+
+        Args:
+            asset (str): the name / identifier of the asset. If None,
+                returns the total pnl of the current strategy. Defaults to None.
+
+        Returns:
+            decimal.Decimal: Total cash flow + net asset value.
+        """
         if identifier == c.CASH:
             return 0.0
         else:
             return self.get_ncf(identifier) + self.get_nav(identifier)
-    
+
     def get_openpositionsummary(self):
-        '''summarize current positions on the owner/symbol level'''
+        """Summarize current positions on the owner/symbol level"""
         d = {}
         for position in self.open_positions.values():
             if position.owner not in d.keys():
@@ -632,9 +794,9 @@ class Strategy(event_handler.EventHandler):
                 d[position.owner][position.symbol]['credit'] += position.credit
                 d[position.owner][position.symbol]['debit'] += position.debit
         return d
-    
+
     def load_openpositions(self, openpositionsummary: dict):
-        '''Create open positions from a dicionary of open position summary'''
+        """Create open positions from a dicionary of open position summary"""
         for owner_summary in openpositionsummary.values():
             for owner_symbol_summary in owner_summary.values():
                 # convert owner to internal symbol if direct child
@@ -653,7 +815,7 @@ class Strategy(event_handler.EventHandler):
                 self.open_positions[position.position_id] = position
 
 
-
+    #TODO
     # def value_open(self, identifier = None):
     #     """
     #     This is the sum of values of current open positions, EXCLUDING CASH.
@@ -674,7 +836,7 @@ class Strategy(event_handler.EventHandler):
     #         v = sum([position.value_open for position_id, position in self.open_positions.items()
     #                     if identifier in (position_id, position.trade_id, position.symbol)])
     #     return v
-    
+
     # def value_pending(self, identifier = None):
     #     """
     #     This is the sum of pending values of current open positions.
@@ -696,47 +858,27 @@ class Strategy(event_handler.EventHandler):
     #                     if identifier in (position_id, position.trade_id, position.symbol)])
     #     return v
 
-    # def total_pnl(self, identifier = None):
-    #     # TODO: identifier can be a trade or a symbol
-    #     '''Realized + unrealized PNL'''
-    #     if identifier is None:
-    #         credit = sum([position.credit for position_id, position in self.open_positions.items()]) \
-    #                     + sum([position.credit for position_id, position in self.closed_positions.items()])
-    #         debit = sum([position.debit for position_id, position in self.open_positions.items()]) \
-    #                     + sum([position.debit for position_id, position in self.closed_positions.items()]) 
-    #     else:
-    #         if identifier in self.open_positions.keys():
-    #             credit = self.open_positions[identifier].credit
-    #             debit = self.open_positions[identifier].debit
-    #         elif identifier in self.closed_positions.keys():
-    #             credit = self.closed_positions[identifier].credit
-    #             debit = self.closed_positions[identifier].debit
-    #         else:
-    #             raise Exception('position not found')
-    #     return credit + self.value_open - debit
 
-    # @property
-    # def net_asset_value(self):
-    #     """
-    #     This is the sum of cash and values of current open positions.
-    #     """
-    #     # pending orders do not affect cash balance
-    #     nav = sum([position.value_open for position_id, position in self.open_positions.items()])
-    #     nav += self.cash.balance
-    #     return nav
-    
-    # @property
-    # def mark(self):
-    #     """NAV / total cash deposited"""
-    #     if self.cash.net_flow != 0:
-    #         return self.net_asset_value / self.cash.net_flow
-    #     else:
-    #         return self.net_asset_value
 
     def to_child(self, child, message):
-        '''
-            To send message to all children, simply specify child = ''
-        '''
+        """Sends a message to a child.
+
+        Args:
+            child (str or bytes): The identifier of the child. Can be one of the following:
+                - Child symbol as string
+                - Child strategy_id as string
+                - Child strategy_id as bytes
+                To broadcast the message to all children, specify child = ''.
+            message (str or dict): If a string is provided, the message will be sent in the
+                'MESSAGE' field of the communication event with the default parameters.
+                If a dict is provided, the message will be padded with the default communication
+                event parameters.
+        """
+        # convenient method to broadcast message to all children
+        if child == '':
+            for child_id in self.children.values():
+                self.to_child(child_id, message)
+            return
 
         # Who to send to?
         # if child is specified by name (symbol), get the strategy_id, as it is what the child is subscribed to
@@ -748,7 +890,7 @@ class Strategy(event_handler.EventHandler):
         else:
             assert isinstance(child, bytes), 'Child must be specified by str of bytes.'
             child_id = child
-        
+
         # What to send?
         default_params = {c.EVENT_TYPE: c.COMMUNICATION, c.EVENT_SUBTYPE: c.REQUEST, c.EVENT_TS: self.clock}
         communication_params = {c.SENDER_ID: self.strategy_id, c.RECEIVER_ID: child_id}
@@ -759,8 +901,16 @@ class Strategy(event_handler.EventHandler):
             message = {**default_params, c.MESSAGE: message, **communication_params}
         self.communication_socket.send(utils.packb(message))
         return
-    
+
     def to_parent(self, message):
+        """Sends a message to the parent.
+
+        Args:
+            message (str or dict): If a string is provided, the message will be sent in the
+                'MESSAGE' field of the communication event with the default parameters.
+                If a dict is provided, the message will be padded with the default communication
+                event parameters.
+        """
         # default message details
         default_params = {c.EVENT_TYPE: c.COMMUNICATION, c.EVENT_SUBTYPE: c.INFO, c.EVENT_TS: self.clock}
         communication_params = {c.SENDER_ID: self.strategy_id, c.RECEIVER_ID: self.parent}
@@ -780,7 +930,7 @@ class Strategy(event_handler.EventHandler):
 
         Args:
             event (dict-like): The event to be processed.
-            direction (UP / DOWN): [description]
+            direction (UP / DOWN): "UP" means towards the parent; "DOWN" means towards the children.
         """
         if c.STRATEGY_CHAIN not in event.keys():
             event[c.STRATEGY_CHAIN] = []
@@ -791,14 +941,25 @@ class Strategy(event_handler.EventHandler):
                 event[c.STRATEGY_CHAIN].append(last)
         if direction == c.UP:
             event[c.STRATEGY_CHAIN].append(self.strategy_id)
-        
+
         return event
 
     # ----------------------------------------------------------------------------------------------------
     # Action stuff
     # ----------------------------------------------------------------------------------------------------
     def create_position(self, symbol, owner = None, asset_class = None, trade_id = None, position_id = None):
-        
+        """Creates a position and add it to self.open_positions.
+
+        Args:
+            symbol (str): The symbol of the asset for the position.
+            owner (str, optional): The owner of the position. If None, defaults to self. Defaults to None.
+            asset_class (str, optional): The asset class the asset belongs to. If None, defaults to equity. Defaults to None.
+            trade_id (str, optional): A convenient way to keep track of trades. Defaults to None.
+            position_id (str, optional): The position ID. If None, one is automatically generated by UUID. Defaults to None.
+
+        Returns:
+            strategy.position: The newly created position.
+        """
         owner = owner or self.strategy_id
         asset_class = asset_class or c.EQUITY
 
@@ -808,7 +969,8 @@ class Strategy(event_handler.EventHandler):
 
     def create_order(self, symbol, quantity, position = None, order_details = None):
         """Creates an order with the provided symbol and quantity.
-            Other parameters are filled with defaults unless otherwise specified in order_details.
+
+            Parameters are filled with defaults unless otherwise specified in order_details.
 
         Args:
             symbol (str): The symbol to create an order for.
@@ -820,15 +982,15 @@ class Strategy(event_handler.EventHandler):
 
         Returns:
             event.order_event: A properly formatted order associated with a position.
-        """        
-        '''Note that order does not impact strategy until it is actually placed'''
+        """
+        """Note that order does not impact strategy until it is actually placed"""
 
         order_details = order_details or {}
-        
+
         _owner = order_details.get(c.STRATEGY_ID) or self.strategy_id
         if _owner in self.children.values():
             _owner = [k for k, v in self.children.items() if v == _owner][0]
-        
+
         if position is None:
             # If there is a position with the symbol already, use the latest one of the positions with the same symbol
             current_positions_in_symbol = [pos for pos in self.open_positions.values() if pos.symbol == symbol and pos.owner == _owner]
@@ -844,13 +1006,13 @@ class Strategy(event_handler.EventHandler):
             pass
         else:
             raise Exception('position must be one of {None, dict, gzmo.core.event_handler.position.Position}')
-        
+
 
         if symbol in self.datas:
             default_price = self.get_mark(symbol)
         else:
             default_price = None
-        
+
         default_order = {
             c.STRATEGY_ID: self.strategy_id,
             c.TRADE_ID: position.trade_id,
@@ -859,12 +1021,12 @@ class Strategy(event_handler.EventHandler):
             c.ORDER_ID: str(uuid.uuid1()),
             c.SYMBOL: position.symbol,
             c.ORDER_TYPE: c.MARKET,
-            c.QUANTITY: quantity,
+            c.QUANTITY: decimal.Decimal(quantity),
             c.EVENT_TS: self.clock.timestamp(),
             c.PRICE: default_price,
-            c.QUANTITY_OPEN: quantity
+            c.QUANTITY_OPEN: decimal.Decimal(quantity)
             }
-        
+
         # if the target is a child, this is a cashflow. Change a few default arguments
         if symbol in self.children.keys() :
             symbol = self.children[symbol]
@@ -873,12 +1035,12 @@ class Strategy(event_handler.EventHandler):
         if symbol in self.children.values():
             default_order[c.ASSET_CLASS] = c.STRATEGY
             default_order[c.EVENT_SUBTYPE] = c.CASHFLOW
-            default_order[c.CREDIT] = -quantity if quantity < 0 else 0
-            default_order[c.DEBIT] = quantity if quantity > 0 else 0
+            default_order[c.CREDIT] = -decimal.Decimal(quantity) if quantity < 0 else 0
+            default_order[c.DEBIT] = decimal.Decimal(quantity) if quantity > 0 else 0
             default_order[c.QUANTITY_FILLED] = default_order.pop(c.QUANTITY_OPEN)
 
         order = {**default_order, **order_details}
-        
+
         return event.order_event(order)
 
     def internalize_order(self, order):
@@ -889,7 +1051,7 @@ class Strategy(event_handler.EventHandler):
         Args:
             order (event.order_event): order to internalize.
         """
-        
+
         _order = copy.deepcopy(order)
         if (symbol := _order.get(c.SYMBOL)) in self.children.values():
             _order[c.SYMBOL] = [k for k, v in self.children.items() if v == symbol][0]
@@ -897,7 +1059,7 @@ class Strategy(event_handler.EventHandler):
         # same for owner
         if (owner := _order.get(c.STRATEGY_ID)) in self.children.values():
             _order[c.STRATEGY_ID] = [k for k, v in self.children.items() if v == owner][0]
-        
+
         return _order
 
     def externalize_order(self, order):
@@ -907,7 +1069,7 @@ class Strategy(event_handler.EventHandler):
         Args:
             order (event.order_event): order to externalize.
         """
-        
+
         order = copy.deepcopy(order)
         if (symbol := order.get(c.SYMBOL)) in self.children.keys():
             order[c.SYMBOL] = self.children[symbol]
@@ -915,9 +1077,9 @@ class Strategy(event_handler.EventHandler):
         # same for owner
         if (owner := order.get(c.STRATEGY_ID)) in self.children.keys():
             order[c.STRATEGY_ID] = self.children[owner]
-        
+
         return order
-    
+
     def positions_handle_order(self, order):
         """Have the strategy's positions handle an internalized order.
 
@@ -977,11 +1139,11 @@ class Strategy(event_handler.EventHandler):
                 receiver_cash_position = receiver_cash_positions[0]
             # handle the order
             receiver_cash_position._handle_event(_order)
-        
+
         return True
 
     def place_order(self, order = None, symbol = None, quantity = None):
-        """Places an order to a child, a parent, or the broker.
+        """Places an order to a child, a parent, or a broker.
             Either order has to be specified as a dictionary, or symbol and quantity must be provided.
 
         Args:
@@ -1013,12 +1175,12 @@ class Strategy(event_handler.EventHandler):
             else:
                 self.to_parent(order)
         return
-    
+
     def deny_order(self, order):
-        '''
-        Deny the request to place an order.
-        Send the denial to the child.
-        '''
+        """Denies the request to place an order.
+
+        Sends the denied order to the child.
+        """
         order = order.update(event_subtype = c.DENIED)
         order = self.format_strategy_chain(event, c.DOWN)
         self.to_child(order[c.STRATEGY_CHAIN].pop(), order)
@@ -1056,7 +1218,26 @@ class Strategy(event_handler.EventHandler):
     #         raise Exception('No trade/position/child strategy found to liquidate.')
 
     def get_equity_curves(self, data = None, agg = None, use_float = False):
-        
+        """Returns the equity curve of assets under the strategy.
+
+        The equity curves can be requested at one of three levels:
+            - individual position (unique on position_id)
+            - symbols (exposures under one asset are aggregated)
+            - owner (exposures under one owner are aggregated)
+
+        Args:
+            data (pd.DataFrame, optional): If provided, used as the marks of the assets.
+                The data should be provided as a dataframe, with timestamp (consistent with
+                the strategy's internal format) as the index, and the symbol of assets as column
+                headers. If None, self.datas will be used. Defaults to None.
+            agg (str, optional): The level to aggregate to. If provided, must be one of ['OWNER', 'SYMBOL'].
+                If None, each position's equity curve will be returned as separate columns. Defaults to None.
+            use_float (bool, optional): Whether to convert the returned dataframe values to float. Defaults to False.
+
+        Returns:
+            pd.DataFrame: The equity curves of positions/symbols/strategies as columns of a dataframe, indexed by timestamp.
+        """
+
         # If data is not provided, use self.datas
         if data is None:
             data = pd.concat([
@@ -1118,10 +1299,8 @@ class Strategy(event_handler.EventHandler):
 # ----------------------------------------------------------------------------------------------------
 
 class RMS(abc.ABC):
-    '''A risk management system that monitors risk and approves/denies order requests'''
+    """A risk management system that monitors risk and approves/denies order requests"""
 
     def request_order_approval(self, position = None, order = None):
-        '''approve or deny the request to place an order. Default True'''
+        """approve or deny the request to place an order. Default True"""
         return True
-
-

@@ -1,4 +1,4 @@
-'''Positions are exposures in assets (could also be a strategy)'''
+"""A Position describes the owner's exposure in an asset."""
 
 
 import abc
@@ -13,24 +13,33 @@ import traceback
 
 
 class Position(event_handler.EventHandler):
-    '''
-    A Position describes the exposure in an asset, within the scope that the Position is in.
-    
-    A Position can be in any asset class, including a `Strategy`.
+    """A Position describes the owner's exposure in an asset.
 
-    A Position is mostly intended to be like a dataclass, but with some capabilities to be udpated based on events.
-
-    Filled orders are reflected in the `_open` attributes,
-        and pending orders are reflected in the `_pending` attributes.
+    The position keeps track of quantities, credits, and debits. The position
+    updates these figures by handling order events.
 
     Long positions are represented as positive quantities,
         while short positions as negative quantities.
 
     Orders that are sent for approval (REQUESTED)/ to the broker (SUBMITTED) are treated as submitted,
-        and are reverted if a FAILED/DENIED/EXPIRED/REJECTED order event is received.
-    
-    If no trade_id is specified, defaults to most recent open trade. If there are no open trades, create a new one.
-    '''
+    and are reverted if a FAILED/DENIED/EXPIRED/REJECTED order event is received.
+
+    Attributes:
+        owner: The owner of this position.
+        symbol: The symbol of the underlying asset.
+        asset_class: The asset class of the underlying asset.
+        trade_id: The trade that this position belongs to.
+        position_id: The unique identifier for this position.
+        status: open or closed.
+        risk: TODO.
+        quantity_open: Open quantity in the asset in this position.
+        quantity_pending: Pending quantity in the asset in this position.
+        commission: Total commission paid on this position. Updated on fills.
+        credit: Cumulative credit on this position. Updated on fills.
+        debit: Cumulative debit on this position. Updated on fills.
+        transactions: Record of all orders processed.
+        quantity_history: Record of open quantities in the position's lifetime. Updated on fills.
+    """
 
     def __init__(
             self,
@@ -56,23 +65,28 @@ class Position(event_handler.EventHandler):
         self.quantity_history = (collections.deque(), collections.deque())
     
     def __str__(self):
+        """Summary of the position as string representation.
 
-        keys = ['symbol', 'position_id', 'quantity_open', 'quantity_pending']
+        Returns:
+            str: Summary of the position.
+        """
+        keys = ['owner', 'symbol', 'position_id', 'quantity_open', 'quantity_pending']
         d = {}
         for key in keys:
             d.update({key: self.__dict__[key]})
 
         return repr(d)
 
-    def _handle_data(self, data):
-        return self.handle_data(data)
-
     def _handle_order(self, order):
-        '''Handle order events'''
+        """Updates the position's attributes with the order.
+        
+        Orders that are sent for approval (REQUESTED)/ to the broker (SUBMITTED) are treated as submitted,
+        and are reverted if a FAILED/DENIED/EXPIRED/REJECTED order event is received.
+        
+        Args:
+            order (dict): Order event to be handled.
+        """
 
-        # confirm that the order belongs to this position
-        # assert order.get(c.STRATEGY_ID) == self.owner,\
-        #     f'Order {order.get(c.ORDER_ID)} belongs to owner {order.get(c.STRATEGY_ID)}, not {self.owner}'
         assert order.get(c.SYMBOL) == self.symbol,\
             f'Order {order.get(c.ORDER_ID)} has symbol {order.get(c.SYMBOL)}, not {self.symbol}'
         
@@ -110,7 +124,7 @@ class Position(event_handler.EventHandler):
             self.debit += order[c.DEBIT]
             self.commission += order[c.COMMISSION]
             # update pending quantity
-            self.quantity_pending -= order[c.QUANTITY]
+            self.quantity_pending -= order[c.QUANTITY_FILLED]
             # update quantity history
             self.quantity_history[0].append(order[c.EVENT_TS])
             self.quantity_history[1].append(self.quantity_open)
@@ -123,24 +137,23 @@ class Position(event_handler.EventHandler):
         #     self.debit += order[c.DEBIT]
         
         return self.handle_order(order)
-    
-    def _handle_command(self, command):
-        return self.handle_command(command)
 
     @property
     def total_pnl(self):
-        '''Realized + unrealized PNL'''
+        """Returns realized + unrealized PNL.
+        
+        Returns credit - debit + open value.
+        Realized and unrealized PNL are not available separately
+        because they depend on accounting methods.
+        """
         return self.credit + self.value_open - self.debit
-
-    # for if we want to add custom action (e.g. notify on fill)
-    def handle_data(self, data):
-        pass
-    def handle_order(self, order):
-        pass
-    def handle_command(self, command):
-        pass
     
     def get_summary(self):
+        """Returns a summary of the position as a dictionary.
+
+        Returns:
+            dict: Summary of the position.
+        """        
         d = {
             'owner': self.owner,
             'symbol': self.symbol,
@@ -157,7 +170,23 @@ class Position(event_handler.EventHandler):
 
 
 class CashPosition(Position):
-    """A position in cash. Handles order a little differently than other positions
+    """A position in cash. Handles order a little differently than other positions.
+    
+    In the event of a "regular" order (where the target is an asset like equity or other strategies),
+    credits and debits the account as indicated in the order.
+
+    In the event of a "cash" order via the strategy's `add_cash` method, credits and debits the
+    account as indicated in the order. The position also keeps track of the total investment (total cash
+    deposited).
+
+    In the event of an incoming "cash" order (i.e. a cash injection from another strategy),
+    signs of credit and debits are reversed since the quantities were originally specified with
+    respect to the strategy that created the order.
+    
+    Attributes:
+        investment: The total investment (net cash deposited) into the strategy.
+        low_bal: Throws an Exception if any order would result in the cash account dipping
+            below `low_bal`.
     """
     def __init__(self, owner, low_bal = 100):
         super().__init__(symbol = c.CASH, owner = owner, asset_class = c.CASH)
@@ -166,12 +195,10 @@ class CashPosition(Position):
 
 
     def _handle_order(self, order):
-        '''Handle order events
-            Note that credit and debits are handled a little differently for cash flow events.
-            Cash injections to the strategy cause a DEBIT while withdrawals cause a CREDIT.
-            This is as if credit and debit are with resepct to the account holding the strategy,
-            while `net` is with respect to the strategy's own internal account.
-        '''
+        """Handled order events.
+
+        See class docstring of handling of cash flows.
+        """
         
         for k in [c.QUANTITY, c.QUANTITY_FILLED, c.QUANTITY_OPEN, c.CREDIT, c.DEBIT, c.COMMISSION]:
             if k in order.keys():
