@@ -182,6 +182,41 @@ STRATEGIES_FULL = 'STRATEGIES_FULL'
 STRATEGIES_INTERNALONLY = 'STRATEGIES_INTERNALONLY'
 NONE = 'NONE'
 
+
+# data attributes
+CONNECTION_TYPE = 'CONNECTION_TYPE'
+REST = 'REST'
+STREAM = 'STREAM'
+
+DATA_TYPE = 'DATA_TYPE'
+BAR = 'BAR'
+QUOTE = 'QUOTE'
+TICK = 'TICK'
+
+DATA_ATTRIBUTES = 'DATA_ATTRIBUTES'
+MULTIPLIER = 'MULTIPLIER'
+RESOLUTION = 'RESOLUTION'
+ALIGNMENT = 'ALIGNMENT'
+START = 'START'
+END = 'END'
+
+# quotes
+ASK_EXCHANGE = 'ASK_EXCHANGE'
+ASK_PRICE = 'ASK_PRICE'
+ASK_SIZE = 'ASK_SIZE'
+BID_EXCHANGE = 'BID_EXCHANGE'
+BID_PRICE = 'BID_PRICE'
+BID_SIZE = 'BID_SIZE'
+CONDITIONS = 'CONDITIONS'
+
+# ticks
+EXCHANGE = 'EXCHANGE'
+PRICE = 'PRICE'
+SIZE = 'SIZE'
+CONDITIONS = 'CONDITIONS'
+TRADE_ID = 'TRADE_ID'
+TAPE = 'TAPE'
+
 #======================================================================================================================
 # Useful constants
 #======================================================================================================================

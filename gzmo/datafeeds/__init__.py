@@ -1,8 +1,14 @@
 """Base datafeed class."""
-
-import zmq
+import configparser
 import threading
 import abc
+import datetime
+
+import pytz
+import zmq
+
+from .. import utils
+from ..utils import constants as c
 
 class BaseDataFeed:
     """Base datafeed class.
@@ -25,7 +31,7 @@ class BaseDataFeed:
             shutdown_flag (threading.Event): If threading is used, this event can be set to signal the datafeed to shut down.
     """
 
-    def __init__(self, topic, zmq_context = None):
+    def __init__(self, topic, query, auth = None, zmq_context = None):
         """ Inits a datafeed object.
 
         Args:
@@ -33,12 +39,22 @@ class BaseDataFeed:
             zmq_context (zmq.Context, optional): ZMQ context instance for publishing. Defaults to None.
         """
         self.topic = topic
+        self.query = query
         self.zmq_context = zmq_context or zmq.Context.instance()
         self.from_beginning = True
         self.start_sync = threading.Event(); self.start_sync.set()  # default to not block for a sync
         self.is_finished = False
         self.main_shutdown_flag = threading.Event()
         self.shutdown_flag = threading.Event()
+
+        # Get auth file if a path if provided
+        if isinstance(auth, str):
+            # read the file
+            config = configparser.ConfigParser()
+            config.read_file(open(auth))
+            self.auth = config
+        else:
+            self.auth = auth
 
     def publish_to(self, address):
         """ Tells the datafeed where to publish to (if sockets are used).
@@ -55,6 +71,7 @@ class BaseDataFeed:
 
     @abc.abstractmethod
     def execute_query(self):
+        """Authentication and connections should be made here."""
         pass
 
     @abc.abstractmethod
@@ -125,3 +142,61 @@ class BaseDataFeed:
         """Shuts down gracefully."""
         self.shutdown_flag.set()
         self.sock_out.close(linger = 10)
+
+
+class DataFeedQuery:
+    """A dictionary providing the necessary parameters for a query for data."""
+
+    @staticmethod
+    def BarQuery(
+            symbol,
+            connection_type = 'REST',
+            start = pytz.timezone('America/New_York').localize(datetime.datetime(2020, 1, 1, 0, 0)).isoformat(),
+            end = pytz.timezone('America/New_York').localize(datetime.datetime(2020, 1, 31, 0, 0)).isoformat(),
+            multiplier = 1,
+            resolution = 'm',
+            align = c.RIGHT):
+            
+        q = {
+            c.DATA_TYPE: c.BAR,
+            c.SYMBOL: symbol,
+            c.CONNECTION_TYPE: connection_type,
+            c.START: start,
+            c.END: end,
+            c.MULTIPLIER: multiplier,
+            c.RESOLUTION: resolution,
+            c.ALIGN: align
+            }
+        return q
+
+    @staticmethod
+    def QuoteQuery(
+            symbol,
+            connection_type = 'REST',
+            start = pytz.timezone('America/New_York').localize(datetime.datetime(2020, 1, 1, 0, 0)).isoformat(),
+            end = pytz.timezone('America/New_York').localize(datetime.datetime(2020, 1, 31, 0, 0)).isoformat()):
+            
+        q = {
+            c.DATA_TYPE: c.QUOTE,
+            c.SYMBOL: symbol,
+            c.CONNECTION_TYPE: connection_type,
+            c.START: start,
+            c.END: end
+            }
+        return q
+
+    @staticmethod
+    def TickQuery(
+            symbol,
+            connection_type = 'REST',
+            start = pytz.timezone('America/New_York').localize(datetime.datetime(2020, 1, 1, 0, 0)).isoformat(),
+            end = pytz.timezone('America/New_York').localize(datetime.datetime(2020, 1, 31, 0, 0)).isoformat()):
+            
+        q = {
+            c.DATA_TYPE: c.TICK,
+            c.SYMBOL: symbol,
+            c.CONNECTION_TYPE: connection_type,
+            c.START: start,
+            c.END: end
+            }
+        return q

@@ -7,7 +7,7 @@ import pandas as pd
 
 from ..utils import constants as c
 
-class lines(dict):
+class Lines(dict):
     """
     A Lines object is a collection of time series belonging to one asset (symbol).
     
