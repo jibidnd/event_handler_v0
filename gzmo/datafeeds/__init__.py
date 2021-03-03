@@ -46,6 +46,7 @@ class BaseDataFeed:
         self.is_finished = False
         self.main_shutdown_flag = threading.Event()
         self.shutdown_flag = threading.Event()
+        self.sock_out = None
 
         # Get auth file if a path if provided
         if isinstance(auth, str):
@@ -70,9 +71,19 @@ class BaseDataFeed:
         self.sock_out.connect(address)
 
     @abc.abstractmethod
+    def format_query(self, query):
+        """Translate the query from standard format to datafeed specific format."""
+        return
+
+    @abc.abstractmethod
     def execute_query(self):
         """Authentication and connections should be made here."""
         pass
+
+    @abc.abstractmethod
+    def format_result(self, result):
+        """Formats the datafeed result to internal standards."""
+        return
 
     @abc.abstractmethod
     def fetch(self, limit = 1):
