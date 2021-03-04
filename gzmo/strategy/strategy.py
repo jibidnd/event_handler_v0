@@ -20,10 +20,11 @@ import json
 import zmq
 
 from .position import Position, CashPosition
-from .. import constants as c
+from .lines import Lines
 from .. import event_handler
-from ..event_handler import event, lines
+from ..event_handler import Event
 from .. import utils
+from ..utils import constants as c
 
 class Strategy(event_handler.EventHandler):
     """A Strategy contains the business logic for making actions given events.
@@ -234,7 +235,7 @@ class Strategy(event_handler.EventHandler):
                     line_args['symbol'] = topic
                     # Create new lines if none exist yet
                 if line_args['symbol'] not in self.datas.keys():
-                    self.datas[line_args['symbol']] = lines(**line_args)
+                    self.datas[line_args['symbol']] = Lines(**line_args)
 
         # subscribe to data now if not lazy
         if not lazy:
@@ -594,7 +595,7 @@ class Strategy(event_handler.EventHandler):
             if answer is None:
                 pass
             else:
-                wrapped_answer = event.communication_event({c.EVENT_SUBTYPE: c.INFO, c.SYMBOL: self.strategy_id})
+                wrapped_answer = Event.communication_event({c.EVENT_SUBTYPE: c.INFO, c.SYMBOL: self.strategy_id})
                 wrapped_answer.update({c.MESSAGE: {communication[c.MESSAGE]: answer}})
                 return self.to_parent(wrapped_answer)
 
@@ -1041,7 +1042,7 @@ class Strategy(event_handler.EventHandler):
 
         order = {**default_order, **order_details}
 
-        return event.order_event(order)
+        return Event.order_event(order)
 
     def internalize_order(self, order):
         """ Returns a copy of the order for internal processing.
@@ -1182,7 +1183,7 @@ class Strategy(event_handler.EventHandler):
         Sends the denied order to the child.
         """
         order = order.update(event_subtype = c.DENIED)
-        order = self.format_strategy_chain(event, c.DOWN)
+        order = self.format_strategy_chain(Event, c.DOWN)
         self.to_child(order[c.STRATEGY_CHAIN].pop(), order)
 
     # def liquidate(self, id_or_symbol = None, order_details = {c.ORDER_TYPE: c.MARKET}):

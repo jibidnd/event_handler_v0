@@ -24,19 +24,9 @@ class SnowflakeDataFeed(BaseDataFeed):
     
     """
 
-    def __init__(self, topic, query, auth, zmq_context = None):
+    # def __init__(self, topic, query, auth, zmq_context = None):
 
-        super().__init__(topic, zmq_context)
-        self.query = query
-        # Get auth for connecting to snowflake
-        # if a path if provided
-        if isinstance(auth, str):
-            # read the file
-            config = configparser.ConfigParser()
-            config.read_file(open(auth))
-            self.auth = config['snowflake']
-        else:
-            self.auth = auth
+    #     super().__init__(topic, query, auth, zmq_context)
     
     def execute_query(self):
         """Execute the query and get ready to emit data."""      

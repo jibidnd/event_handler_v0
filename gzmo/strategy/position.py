@@ -1,15 +1,11 @@
 """A Position describes the owner's exposure in an asset."""
 
-
-import abc
 import collections
 import uuid
 import decimal
 
-from .. import constants as c
+from ..utils import constants as c
 from .. import event_handler
-
-import traceback
 
 
 class Position(event_handler.EventHandler):

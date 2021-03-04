@@ -154,10 +154,141 @@ class EventHandler:
         """
         return
 
+class Event(dict):
+    """Subclasses dict to provide dottable access of properties.
+    
+    This class provides the general structure of 1 single event.
+    It serves as the template for how events should be consumed -- fields to
+    expect, structure, etc.
+
+    Since dicts are much faster than dataclasses in creation, and we'll be
+    creating lots of datapoints, we'll subclass a dict instead of using
+    dataclasses.
+    """
+
+    def __getattr__(self, key):
+        """Makes the dot notation available.
+
+        Args:
+            key (str): The key of the dictionary to access. A case-sensitive
+                match is first attempted, before a case-insensitive attempt.
+                A case-insensitive attempt is ~3 times slower.
+
+        Raises:
+            KeyError: If no matches are found.
+
+        Returns:
+            deque: The requested element of the dict; a deque object.
+        """
+        if key in self.keys():
+            return self[key]
+        elif (matching_keys := [k for k in self.keys() if k.lower() == key.lower()]) != []:
+            # 3 times slower, try to avoid this
+            _key = matching_keys[0]
+            return self[_key]
+        else:
+            raise KeyError(key)
+
+class DataEvent(Event):
+    """Subclasses Event to have data-specific events..
+    
+    Each datafeed should return DataEvent objects to keep a consistent
+    format for consumption.
+    """
+    
+    @staticmethod
+    def base_data_event(
+            event_ts,
+            event_subtype,
+            symbol):
+        
+        datapoint = {
+            c.EVENT_TS: event_ts,
+            c.EVENT_TYPE: c.DATA,
+            c.EVENT_SUBTYPE: event_subtype,
+            c.SYMBOL: symbol
+        }
+
+        return datapoint
+    
+    @staticmethod
+    def bar(
+            event_ts = None,
+            symbol = None,
+            open_ = None,
+            high = None,
+            low = None,
+            close = None,
+            volume = None):
+
+        data = DataEvent.base_data_event(event_ts, c.BAR, symbol)
+
+        data.update({
+            c.EVENT_TS: event_ts,
+            c.OPEN: open_,
+            c.HIGH: high,
+            c.LOW: low,
+            c.CLOSE: close,
+            c.VOLUME: volume
+        })
+
+        return data
+
+    def quote(
+            event_ts = None,
+            symbol = None,
+            ask_exchange = None,
+            ask_price = None,
+            ask_size = None,
+            bid_exchange = None,
+            bid_price = None,
+            bid_size = None,
+            quote_conditions = None):
+        
+        data = DataEvent.base_data_event(event_ts, c.QUOTE, symbol)
+
+        data.update({
+            c.EVENT_TS: event_ts,
+            c.ASK_EXCHANGE: ask_exchange,
+            c.ASK_PRICE: ask_price,
+            c.ASK_SIZE: ask_size,
+            c.BID_EXCHANGE: bid_exchange,
+            c.BID_PRICE: bid_price,
+            c.BID_SIZE: bid_size,
+            c.QUOTE_CONDITIONS: quote_conditions
+        })
+
+        return data
+    
+    def tick(
+            event_ts = None,
+            symbol = None,
+            exchange = None,
+            price = None,
+            size = None,
+            conditions = None,
+            trade_id = None,
+            tape = None):
+        
+        data = DataEvent.base_data_event(event_ts, c.TICK, symbol)
+
+        data.update({
+            c.EVENT_TS: event_ts,
+            c.EXCHANGE: exchange,
+            c.PRICE: price,
+            c.SIZE: size,
+            c.CONDITIONS: conditions,
+            c.TRADE_ID: trade_id,
+            c.TAPE: tape
+        })
+
+        return data
+
+
 # Define events
 # All events will be in the form of dictionary, since they will all just be data packets, and dicts are very fast
 # Templates
-class event:
+class Event_0:
 
     @staticmethod
     def order_event(dict_order_details = {}):
