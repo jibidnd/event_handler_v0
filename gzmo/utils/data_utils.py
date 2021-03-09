@@ -16,6 +16,31 @@ def to_columnar(lst_dicts, data_keys) -> dict:
     '''
     return {k: [dict_i.get(k) for dict_i in lst_dicts] for k in data_keys}
 
+def to_isoformat(dict_data, endswiths = None):
+    dict_data = {**dict_data}
+    endswiths = endswiths or ['_at', '_timestamp', '_time', 'EVENT_TS']
+    for key in dict_data.keys():
+        for endswith in endswiths:
+            if key.endswith(endswith):
+                try:
+                    dict_data[key] = pd.Timestamp(dict_data[key]).isoformat()
+                except:
+                    pass
+    
+    return dict_data
+
+def to_timestamp(dict_data, endswiths = None):
+    dict_data = {**dict_data}
+    endswiths = endswiths or ['_at', '_timestamp', '_time', 'EVENT_TS']
+    for key in dict_data.keys():
+        for endswith in endswiths:
+            if key.endswith(endswith):
+                try:
+                    dict_data[key] = pd.Timestamp(dict_data[key])
+                except:
+                    pass
+    
+    return dict_data
 
 
 ISO8601YMD = re.compile(r'\d{4}-\d{2}-\d{2}T')

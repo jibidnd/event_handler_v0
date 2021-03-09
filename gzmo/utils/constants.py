@@ -17,27 +17,38 @@ CLOSED = 'CLOSED'
 PENDING = 'PENDING'
 
 # event_subtype for orders
-# from strategy
+# order statuses
 REQUESTED = 'REQUESTED'         # an order request is created for approval
 DENIED = 'DENIED'               # an order request is denied
+FAILED = 'FAILED'               # Order is attempted but is unsuccessful
 SUBMITTED = 'SUBMITTED'         # order is successfully submitted to the broker
-FAILED = 'FAILED'    # Order is submitted to the broker but no RECEIVED message was received
-CASHFLOW = 'CASHFLOW'
-
-# from broker
 RECEIVED = 'RECEIVED'           # order is received by the broker
 FILLED = 'FILLED'               # order is filled (complete)
 PARTIALLY_FILLED = \
     'PARTIALLY_FILLED'          # order is filled (partial)
 EXPIRED = 'EXPIRED'             # order is expired
-CANCELLED = 'CANCELLED'         # order has been cancelled
+CANCELLED = 'CANCELLED'         # order has been cancelled/replaced
 REJECTED = 'REJECTED'           # order is rejected
-INVALID = 'INVALID'
+INVALID = 'INVALID'             # order is invalid
+PENDING_CANCEL = \
+    'PENDING_CANCEL'            # order is pending cancel/replace
+CASHFLOW = 'CASHFLOW'
+
 
 # Order types
 MARKET = 'MARKET'
 LIMIT = 'LIMIT'
 CANCELLATION = 'CANCELLATION'
+TRAILING_STOP = 'TRAILING_STOP'
+
+
+# Order classes
+SIMPLE = 'SIMPLE'
+OCO = 'OCO'
+BRACKET = 'BRACKET'
+OTO = 'OTO'
+
+
 
 # event_types
 DATA = 'DATA'
@@ -157,16 +168,25 @@ STRATEGY_ADDRESS = 'STRATEGY_ADDRESS'
 # from request
 SYMBOL = 'SYMBOL'
 ORDER_TYPE = 'ORDER_TYPE'
+ORDER_CLASS = 'ORDER_CLASS'
 PRICE = 'PRICE'
+LIMIT_PRICE = 'LIMIT_PRICE'
+STOP_PRICE = 'STOP_PRICE'
+TRAIL_PRICE = 'TRAIL_PRICE'
+TRAIL_PERCENT = 'TRAIL_PERCENT'
 QUANTITY = 'QUANTITY'
+NOTIONAL = 'NOTIONAL'
 BROKER = 'BROKER'
+BROKER_ORDER_ID = 'BROKER_ORDER_ID'
+MEMO = 'MEMO'
 # incremental
 CREDIT = 'CREDIT'
 DEBIT = 'DEBIT'
 COMMISSION = 'COMMISSION'
 QUANTITY_FILLED = 'QUANTITY_FILLED'
-AVERAGE_PRICE = 'AVERAGE_PRICE'
+AVERAGE_FILL_PRICE = 'AVERAGE_FILL_PRICE'
 OWNER = 'OWNER'
+TIME_IN_FORCE = 'TIME_IN_FORCE'
 # cumulative
 # CREDIT_TOTAL = 'CREDIT_TOTAL'
 # DEBIT_TOTAL = 'DEBIT_TOTAL'
@@ -175,6 +195,16 @@ OWNER = 'OWNER'
 # QUANTITY_OPEN = 'QUANTITY_OPEN'
 # QUANTITY_FILLED_TOTAL = 'QUANTITY_FILLED_TOTAL'
 # AVERAGE_PRICE_TOTAL = 'AVERAGE_PRICE_TOTAL'
+
+# Order time in force values
+GTC = 'GTC'     # Good till cancel
+DAY = 'DAY'     # Day
+MOO = 'MOO'     # Market on open
+LOO = 'LOO'     # Limit on open
+MOC = 'MOC'     # Market on close
+LOC = 'LOC'     # Limit on close
+FOK = 'FOK'     # Fill or kill
+IOC = 'IOC'     # Immediate or cancel
 
 # session socket modes
 ALL = 'ALL'

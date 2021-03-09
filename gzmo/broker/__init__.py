@@ -4,7 +4,10 @@ import abc
 import uuid
 import threading
 from decimal import Decimal
+import datetime
+import configparser
 
+import pandas as pd
 import zmq
 
 from .. import event_handler
@@ -36,7 +39,7 @@ class BaseBroker(event_handler.EventHandler):
         clock (decimal.Decimal): UTC timestamp to keep track of time.
     """
 
-    def __init__(self, name, zmq_context = None):
+    def __init__(self, name, auth = None, zmq_context = None):
         """Instantiates a broker object.
 
         Args:
@@ -47,8 +50,15 @@ class BaseBroker(event_handler.EventHandler):
         self.name = name
         self.broker_id = str(uuid.uuid1())  # Note that this shows the network address.
         self.zmq_context = zmq_context
-        self.open_orders = {}               # better to refer to orders by id so we can refer to the same order even if attributes change
-        self.closed_orders = []
+
+        # Get auth file if a path if provided
+        if isinstance(auth, str):
+            # read the file
+            config = configparser.ConfigParser()
+            config.read_file(open(auth))
+            self.auth = config
+        else:
+            self.auth = auth
 
         # Connection things
         self.data_address = None
@@ -63,7 +73,7 @@ class BaseBroker(event_handler.EventHandler):
         self.shutdown_flag = threading.Event()
         
         # clock to keep track of time
-        self.clock = Decimal(0.00)
+        # self.clock = Decimal(0.00)
     
     # ----------------------------------------------------------------------------------------
     # Connections
@@ -137,15 +147,15 @@ class BaseBroker(event_handler.EventHandler):
     # ----------------------------------------------------------------------------------------
     # Event handling
     # ----------------------------------------------------------------------------------------
-    def _handle_data(self, data):
-        """Class method to handle incoming data events.
+    def _process_data(self, data):
+        """Class method to process incoming data events.
 
         Args:
             data (dict): Event with EVENT_TYPE = 'DATA'. Likely price/market data.
         """        
         pass
 
-    def handle_data(self, data):
+    def process_data(self, data):
         """To be overriden by instance for data-handling specific actions.
 
         Args:
@@ -153,21 +163,28 @@ class BaseBroker(event_handler.EventHandler):
         """        
         pass
     
-    def _handle_order(self, order):
-        """Class method to handle an incoming order events.
+    def _process_order(self, order):
+        """Class method to process an incoming order events.
 
         Args:
             order (dict): Event with EVENT_TYPE = 'ORDER'. Should carry order parameters
                 that the broker needs to fill the order.
-        """        
-        order_response = self.take_order(order)
-        if (order_response is not None) and (self.order_socket is not None):
-            # emit the response if there is any
-            order_response_packed = utils.packb(order_response)
-            self.order_socket.send(order_response_packed, flags = zmq.NOBLOCK)
-        return self.handle_order(order)
+        """
+        order_internal = self.format_order_in(order)
+        order_external = self.format_order_out(order)
 
-    def handle_order(self, order):
+        # if this is an order request from a strategy
+        if order_internal[c.EVENT_SUBTYPE] == c.REQUESTED:
+            self.place_order(order_external)
+        # otherwise it's a response from the broker. Send it to the strategy
+        else:
+            if (self.order_socket is not None):
+                self.order_socket.send(utils.packb(order_internal))
+        
+        self.process_order(order)
+        return
+
+    def process_order(self, order):
         """To be overriden by instance for order-handling specific actions.
 
         Args:
@@ -175,15 +192,14 @@ class BaseBroker(event_handler.EventHandler):
                 that the broker needs to fill the order.
         """  
         pass
-
-    @abc.abstractmethod
-    def take_order(self, order):
-        """Takes an incoming order. To be implemented by the concrete broker class.
-
-        Args:
-            order (dict): ORDER event.
-        """        
-        pass
+    
+    # @abc.abstractmethod
+    def format_order_out(self, order):
+        return order
+    
+    # @abc.abstractmethod
+    def format_order_in(self, order):
+        return order
 
     def run(self):
         """Processes events from sockets.
@@ -198,7 +214,7 @@ class BaseBroker(event_handler.EventHandler):
         while (not self.main_shutdown_flag.is_set()) and (not self.shutdown_flag.is_set()):
             
             # get from data socket if slot is empty
-            if next_events.get(c.DATA_SOCKET) is None:
+            if (next_events.get(c.DATA_SOCKET) is None) and (self.data_socket is not None):
                 try:
                     # This is a SUB
                     topic, event_packed = self.data_socket.recv_multipart(zmq.NOBLOCK)
@@ -211,7 +227,7 @@ class BaseBroker(event_handler.EventHandler):
                         raise
             
             # get from order socket if slot is empty
-            if next_events.get(c.ORDER_SOCKET) is None:
+            if (next_events.get(c.ORDER_SOCKET) is None) and (self.order_socket is not None):
                 try:
                     # This is a dealer
                     order_packed = self.order_socket.recv(zmq.NOBLOCK)
@@ -241,3 +257,220 @@ class BaseBroker(event_handler.EventHandler):
         self.shutdown_flag.set()
         for socket in [self.data_socket, self.order_socket, self.logging_socket]:
             socket.close(linger = 10)
+
+
+
+class OrderEvent:
+    """Subclasses Event to have data-specific events.
+    
+    Each datafeed should return DataEvent objects to keep a consistent
+    format for consumption.
+    """
+    
+    class base_order_event(event_handler.Event):
+
+        def __init__(
+            self,
+            event_subtype,
+            order_type,
+            order_class,
+            symbol,
+            event_ts,
+            ):
+            # ,
+            # # order creation
+            # quantity = None,
+            # notional = None,
+            # time_in_force = c.GTC,
+            # limit_price = None,
+            # stop_price = None,
+            # trail_price = None,
+            # trail_percent = None,
+            # extended_hours = False,
+            # take_profit = None,
+            # stop_loss = None,
+            # # order fills
+            # quantity_filled = None,
+            # average_fill_price = None,
+            # credit = 0,
+            # debit = 0,
+            # commission = 0,
+            # # order info
+            # strategy_id = None,
+            # broker = None,
+            # order_id = uuid.uuid1(),
+            # broker_order_id = None,
+            # event_ts = datetime.datetime.now(),
+            # created_at = datetime.datetime.now(),
+            # updated_at = datetime.datetime.now(),
+            # submitted_at = None,
+            # memo = None,
+            # asset_class = None
+            # ):
+
+            super().__init__(
+                event_type = c.ORDER,
+                event_subtype = event_subtype,
+                event_ts = event_ts)
+
+            self.update({
+                c.SYMBOL: symbol,
+                c.ORDER_TYPE: order_type,
+                c.ORDER_CLASS: order_class
+            })
+
+            # for kwarg, name in [
+            #     (order_type, c.ORDER_TYPE),
+            #     (order_class, c.ORDER_CLASS),
+            #     (quantity, c.QUANTITY),
+            #     (notional, c.NOTIONAL),
+            #     (time_in_force, c.TIME_IN_FORCE),
+            #     (limit_price, c.LIMIT_PRICE),
+            #     (stop_price, c.STOP_PRICE),
+            #     (trail_price, c.TRAIL_PRICE),
+            #     (trail_percent, c.TRAIL_PERCENT),
+            #     (extended_hours, c.EXTENDED_HOURS),
+            #     (take_profit, c.TAKE_PROFIT),
+            #     (stop_loss, c.STOP_LOSS),
+            #     # order fills
+            #     (quantity_filled, c.QUANTITY_FILLED),
+            #     (average_fill_price, c.AVERAGE_FILL_PRICE),
+            #     (credit, c.CREDIT),
+            #     (debit, c.DEBIT),
+            #     (commission, c.COMMISSION),
+            #     # order info
+            #     (strategy_id, c.STRATEGY_ID),
+            #     (broker, c.BROKER),
+            #     (order_id, c.ORDER_ID),
+            #     (broker_order_id, c.BROKER_ORDER_ID),
+            #     (event_ts, c.EVENT_TS),
+            #     (created_at, c.CREATED_AT),
+            #     (updated_at, c.UPDATED_AT),
+            #     (submitted_at, c.SUBMITTED_AT),
+            #     (memo, c.MEMO),
+            #     (asset_class, c.ASSET_CLASS)]:
+                
+            #     if kwarg is not None:
+            #         self[name] = kwarg
+
+            return
+    
+    class order_response(base_order_event):
+        def __init__(
+            quantity_filled = None,
+            average_fill_price = None,
+            credit = 0,
+            debit = 0,
+            commission = 0
+        ):
+
+
+
+    class limit_order(base_order_event):
+        def __init__(
+            self,
+            symbol,
+            limit_price,
+            quantity = None,
+            notional = None,
+            event_subtype = c.REQUESTED,
+            time_in_force = c.GTC,
+            broker = None,
+            order_id = None,
+            broker_order_id = None,
+            event_ts = None,
+            created_at = None,
+            updated_at = None,
+            memo = None,
+            asset_class = c.EQUITY,
+            **kwargs
+        ):
+
+            super().__init__(
+                event_subtype = event_subtype,
+                order_type = c.LIMIT,
+                order_class = c.SIMPLE,
+                symbol = symbol,
+                event_ts = event_ts
+            )
+
+            self[c.LIMIT_PRICE] = limit_price
+            # how much to order?
+            if quantity is not None:
+                self[c.QUANTITY] = quantity
+            elif notional is not None:
+                self[c.NOTIONAL] = notional
+            else:
+                raise Exception('Must provide one of quantity or notional')
+            # get time
+            now = datetime.datetime.now()
+            for time, val in [
+                    (c.CREATED_AT, created_at),
+                    (c.UPDATED_AT, updated_at)]:
+                self[time] = val or now
+            # other args
+            for name, val in [
+                    (c.TIME_IN_FORCE, time_in_force),
+                    (c.BROKER, broker),
+                    (c.ORDER_ID, order_id),
+                    (c.BROKER_ORDER_ID, broker_order_id),
+                    (c.MEMO, memo),
+                    (c.ASSET_CLASS, asset_class)]:
+                if val is not None:
+                    self[name] = val
+            return
+
+    class market_order(base_order_event):
+        def __init__(
+            self,
+            symbol,
+            quantity = None,
+            notional = None,
+            event_subtype = c.REQUESTED,
+            time_in_force = c.GTC,
+            broker = None,
+            order_id = None,
+            broker_order_id = None,
+            event_ts = None,
+            created_at = None,
+            updated_at = None,
+            memo = None,
+            asset_class = c.EQUITY
+        ):
+
+            super().__init__(
+                event_subtype = event_subtype,
+                order_type = c.LIMIT,
+                order_class = c.SIMPLE,
+                symbol = symbol,
+                event_ts = event_ts
+            )
+
+            self[c.ORDER_ID] = order_id or uuid.uuid1()
+
+            # how much to order?
+            if quantity is not None:
+                self[c.QUANTITY] = quantity
+            elif notional is not None:
+                self[c.NOTIONAL] = notional
+            else:
+                raise Exception('Must provide one of quantity or notional')
+
+            # get time
+            now = datetime.datetime.now()
+            for time, val in [
+                    (c.CREATED_AT, created_at),
+                    (c.UPDATED_AT, updated_at)]:
+                self[time] = val or now
+
+            # other args
+            for name, val in [
+                    (c.TIME_IN_FORCE, time_in_force),
+                    (c.BROKER, broker),
+                    (c.ORDER_ID, order_id),
+                    (c.BROKER_ORDER_ID, broker_order_id),
+                    (c.MEMO, memo),
+                    (c.ASSET_CLASS, asset_class)]:
+                if val is not None:
+                    self[name] = val
+            return
