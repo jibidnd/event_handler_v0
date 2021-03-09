@@ -800,28 +800,39 @@ def communication_proxy(address, capture = None, context = None, shutdown_flag =
     return
 
 class SocketEmulator:
-    def __init__(self, deq = None):
-        """A class to emulate strategy sockets for communication when zmq is not desired.
+    def __init__(self, deq_in = None, deq_out = None):
+        """A class to emulate strategy sockets for communication.
             Doesn't fully emulate dealer-router type sockets, as one cannot extract the sender identity.
             Sender should include SENDER_ID or RECEIVER_ID in the message in those cases.
 
         Args:
             deq (collection.deque instance, optional): The deque to append received events to. Defaults to None.
         """
-        if deq is not None:
-            self.deq = deq
+        if deq_in is not None:
+            self.deq_in = deq_in
         else:
-            self.deq = deque()
+            self.deq_in = deque()
+        
+        if deq_out is not None:
+            self.deq_out = deq_out
+        else:
+            self.deq_out = deque()
 
     def send(self, item):
-        self.deq.append(utils.unpackb(item))
+        self.deq_in.append(utils.unpackb(item))
 
     def send_multipart(self, items):
         item = items[1]
-        self.deq.append(utils.unpackb(item))
+        self.deq_in.append(utils.unpackb(item))
 
     def recv(self):
-        raise zmq.ZMQError(errno = zmq.EAGAIN, msg = 'Socket emulator: Nothing to receive.')
+        if self.deq_out:
+            return self.deq_out.popleft()
+        else:
+            raise zmq.ZMQError(errno = zmq.EAGAIN, msg = 'Socket emulator: Nothing to receive.')
     
     def recv_multipart(self):
-        raise zmq.ZMQError(errno = zmq.EAGAIN, msg = 'Socket emulator: Nothing to receive.')
+        if self.deq_out:
+            return self.deq_out.popleft()
+        else:
+            raise zmq.ZMQError(errno = zmq.EAGAIN, msg = 'Socket emulator: Nothing to receive.')

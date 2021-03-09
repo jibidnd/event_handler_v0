@@ -13,6 +13,8 @@
 import datetime
 import uuid
 
+import pandas as pd
+
 from .utils import constants as c
 
 
@@ -35,7 +37,7 @@ class EventHandler:
     External methods should be called by internal methods, after all action in the internal methods are done.
 
     In general, there are three stages to handling an event:
-        - Before receiving the next event:
+        - Before processing the next event:
             _prenext, prenext
         - Preprocess the event:
             _preprocess_event, preprocess_event
@@ -69,6 +71,8 @@ class EventHandler:
         return
 
     def _preprocess_event(self, event):
+        # convert to timestamp
+        event[c.EVENT_TS] = event[c.EVENT_TS]
         return self.preprocess_event(event)
     
     def preprocess_event(self, event):
@@ -166,6 +170,18 @@ class Event(dict):
     dataclasses.
     """
 
+    def __init__(
+            self,
+            event_type,
+            event_subtype,
+            event_ts):
+        
+        super().__init__()
+        self[c.EVENT_TYPE] = event_type
+        self[c.EVENT_SUBTYPE] = event_subtype
+        self[c.EVENT_TS] = event_ts
+
+
     def __getattr__(self, key):
         """Makes the dot notation available.
 
@@ -188,169 +204,3 @@ class Event(dict):
             return self[_key]
         else:
             raise KeyError(key)
-
-class DataEvent(Event):
-    """Subclasses Event to have data-specific events..
-    
-    Each datafeed should return DataEvent objects to keep a consistent
-    format for consumption.
-    """
-    
-    @staticmethod
-    def base_data_event(
-            event_ts,
-            event_subtype,
-            symbol):
-        
-        datapoint = {
-            c.EVENT_TS: event_ts,
-            c.EVENT_TYPE: c.DATA,
-            c.EVENT_SUBTYPE: event_subtype,
-            c.SYMBOL: symbol
-        }
-
-        return datapoint
-    
-    @staticmethod
-    def bar(
-            event_ts = None,
-            symbol = None,
-            open_ = None,
-            high = None,
-            low = None,
-            close = None,
-            volume = None):
-
-        data = DataEvent.base_data_event(event_ts, c.BAR, symbol)
-
-        data.update({
-            c.EVENT_TS: event_ts,
-            c.OPEN: open_,
-            c.HIGH: high,
-            c.LOW: low,
-            c.CLOSE: close,
-            c.VOLUME: volume
-        })
-
-        return data
-
-    def quote(
-            event_ts = None,
-            symbol = None,
-            ask_exchange = None,
-            ask_price = None,
-            ask_size = None,
-            bid_exchange = None,
-            bid_price = None,
-            bid_size = None,
-            quote_conditions = None):
-        
-        data = DataEvent.base_data_event(event_ts, c.QUOTE, symbol)
-
-        data.update({
-            c.EVENT_TS: event_ts,
-            c.ASK_EXCHANGE: ask_exchange,
-            c.ASK_PRICE: ask_price,
-            c.ASK_SIZE: ask_size,
-            c.BID_EXCHANGE: bid_exchange,
-            c.BID_PRICE: bid_price,
-            c.BID_SIZE: bid_size,
-            c.QUOTE_CONDITIONS: quote_conditions
-        })
-
-        return data
-    
-    def tick(
-            event_ts = None,
-            symbol = None,
-            exchange = None,
-            price = None,
-            size = None,
-            conditions = None,
-            trade_id = None,
-            tape = None):
-        
-        data = DataEvent.base_data_event(event_ts, c.TICK, symbol)
-
-        data.update({
-            c.EVENT_TS: event_ts,
-            c.EXCHANGE: exchange,
-            c.PRICE: price,
-            c.SIZE: size,
-            c.CONDITIONS: conditions,
-            c.TRADE_ID: trade_id,
-            c.TAPE: tape
-        })
-
-        return data
-
-
-# Define events
-# All events will be in the form of dictionary, since they will all just be data packets, and dicts are very fast
-# Templates
-class Event_0:
-
-    @staticmethod
-    def order_event(dict_order_details = {}):
-        """Create an order with default arguments.
-        
-        See constants.py for event_subtypes for orders.
-        """
-        order = {
-            c.EVENT_TYPE: c.ORDER,
-            c.EVENT_SUBTYPE: c.REQUESTED,
-            c.EVENT_TS: datetime.datetime.now().timestamp(),
-            c.SYMBOL: None,
-            c.ASSET_CLASS: c.EQUITY,
-            c.ORDER_TYPE: c.MARKET,
-            c.PRICE: None,
-            c.QUANTITY: None,
-            c.STRATEGY_ID: None,
-            c.TRADE_ID: None,
-            c.ORDER_ID: None,
-            c.EVENT_ID: str(uuid.uuid1()),
-            # order fill information
-            c.QUANTITY_OPEN: None,
-            c.QUANTITY_FILLED: None,
-            # credit, debit, and net are changes to order[strategy_id]
-            c.CREDIT: 0,
-            c.DEBIT: 0,
-            c.BROKER: None,
-            c.COMMISSION: 0
-        }
-
-        order.update(**dict_order_details)
-
-        return order
-
-    @staticmethod
-    def data_event(dict_data_details = {}):
-        """
-        Create a data event with default arguments.
-        See constants.py for event_subtypes for data.
-        """
-        data = {
-            c.EVENT_TYPE: c.DATA,
-            c.EVENT_SUBTYPE: None,
-            c.EVENT_TS: datetime.datetime.now(),
-            c.SYMBOL: None
-        }
-        data.update(**dict_data_details)
-
-        return data
-    
-    @staticmethod
-    def communication_event(dict_communication_details = {}):
-        """
-        Create a data event with default arguments.
-        See constants.py for event_subtypes for data.
-        """
-        communication = {
-            c.EVENT_TYPE: c.COMMUNICATION,
-            c.EVENT_SUBTYPE: c.REQUEST,
-            c.EVENT_TS: datetime.datetime.now(),
-            c.CONTEXT: None
-        }
-        communication.update(**dict_communication_details)
-
-        return communication

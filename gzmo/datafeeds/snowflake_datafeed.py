@@ -23,10 +23,6 @@ class SnowflakeDataFeed(BaseDataFeed):
                     documented above.
     
     """
-
-    # def __init__(self, topic, query, auth, zmq_context = None):
-
-    #     super().__init__(topic, query, auth, zmq_context)
     
     def execute_query(self):
         """Execute the query and get ready to emit data."""      

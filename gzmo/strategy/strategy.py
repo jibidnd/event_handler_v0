@@ -23,6 +23,7 @@ from .position import Position, CashPosition
 from .lines import Lines
 from .. import event_handler
 from ..event_handler import Event
+from ..broker import OrderEvent
 from .. import utils
 from ..utils import constants as c
 
@@ -412,28 +413,38 @@ class Strategy(event_handler.EventHandler):
 
         while not shutdown_flag.is_set():
 
-            # Attempt to fill the event queue for any slots that are empty
-            for name, socket in zip([c.COMMUNICATION_SOCKET, c.DATA_SOCKET, c.ORDER_SOCKET],
-                                    [self.communication_socket, self.data_socket, self.order_socket]):
-                if socket is None: continue
-                if next_events.get(name) is None:
-                    self._prenext()
-                    try:
-                        # Attempt to receive from each socket, but do not block
-                        if socket.socket_type in [zmq.SUB, zmq.ROUTER]:
-                            topic, event = socket.recv_multipart(zmq.NOBLOCK)
-                        elif socket.socket_type in [zmq.DEALER]:
-                            event = socket.recv(zmq.NOBLOCK)
-                        else:
-                            raise Exception(f'Unanticipated socket type {socket.socket_type}')
-                        next_events[name] = self._preprocess_event(utils.unpackb(event))
-                    except zmq.ZMQError as exc:
-                        if exc.errno == zmq.EAGAIN:
-                            # Nothing to grab
-                            pass
-                        else:
-                            raise
+            if (next_events.get(c.COMMUNICATION_SOCKET) is None) and (self.communication_socket is not None):
+                try:
+                    event = self.communication_socket.recv(zmq.NOBLOCK)
+                    next_events[c.COMMUNICATION_SOCKET] = utils.unpackb(event)
+                except zmq.ZMQError as exc:
+                    if exc.errno == zmq.EAGAIN:
+                        # Nothing to grab
+                        pass
+                    else:
+                        raise
+            
+            if (next_events.get(c.DATA_SOCKET) is None) and (self.data_socket is not None):
+                try:
+                    topic, event = self.data_socket.recv_multipart(zmq.NOBLOCK)
+                    next_events[c.DATA_SOCKET] = utils.unpackb(event)
+                except zmq.ZMQError as exc:
+                    if exc.errno == zmq.EAGAIN:
+                        # Nothing to grab
+                        pass
+                    else:
+                        raise
 
+            if (next_events.get(c.ORDER_SOCKET) is None) and (self.order_socket is not None):
+                try:
+                    topic, event = self.order_socket.recv_multipart(zmq.NOBLOCK)
+                    next_events[c.ORDER_SOCKET] = utils.unpackb(event)
+                except zmq.ZMQError as exc:
+                    if exc.errno == zmq.EAGAIN:
+                        # Nothing to grab
+                        pass
+                    else:
+                        raise
 
             # Now we can sort the upcoming events and process the next event
             if len(next_events) > 0:
@@ -968,7 +979,7 @@ class Strategy(event_handler.EventHandler):
         self.open_positions[position.position_id] = position
         return position
 
-    def create_order(self, symbol, quantity, position = None, order_details = None):
+    def prepare_order(self, order, position = None):
         """Creates an order with the provided symbol and quantity.
 
             Parameters are filled with defaults unless otherwise specified in order_details.
@@ -986,12 +997,14 @@ class Strategy(event_handler.EventHandler):
         """
         """Note that order does not impact strategy until it is actually placed"""
 
-        order_details = order_details or {}
+        _owner = order.get(c.STRATEGY_ID) or self.strategy_id
+        symbol = order[c.SYMBOL]
 
-        _owner = order_details.get(c.STRATEGY_ID) or self.strategy_id
+        # Convert children strategy_ids to their names
         if _owner in self.children.values():
             _owner = [k for k, v in self.children.items() if v == _owner][0]
-
+        
+        # assign the order to a position
         if position is None:
             # If there is a position with the symbol already, use the latest one of the positions with the same symbol
             current_positions_in_symbol = [pos for pos in self.open_positions.values() if pos.symbol == symbol and pos.owner == _owner]
@@ -1006,43 +1019,37 @@ class Strategy(event_handler.EventHandler):
         elif isinstance(position, Position):
             pass
         else:
-            raise Exception('position must be one of {None, dict, gzmo.core.event_handler.position.Position}')
-
-
+            raise Exception('position must be one of {None, dict, strategy.position.Position}')
+        
+        # default price
         if symbol in self.datas:
             default_price = self.get_mark(symbol)
         else:
             default_price = None
 
-        default_order = {
+        # add information to order
+        info = {
             c.STRATEGY_ID: self.strategy_id,
             c.TRADE_ID: position.trade_id,
             c.POSITION_ID: position.position_id,
-            c.ASSET_CLASS: c.EQUITY,
-            c.ORDER_ID: str(uuid.uuid1()),
-            c.SYMBOL: position.symbol,
-            c.ORDER_TYPE: c.MARKET,
-            c.QUANTITY: decimal.Decimal(quantity),
-            c.EVENT_TS: self.clock.timestamp(),
-            c.PRICE: default_price,
-            c.QUANTITY_OPEN: decimal.Decimal(quantity)
-            }
+            c.ORDER_ID: order.get(c.ORDER_ID) or str(uuid.uuid1()),
+            c.EVENT_TS: self.clock.isoformat()
+        }
 
+        order = {**order, **info}
+        order = self.externalize_order(order)
+        
         # if the target is a child, this is a cashflow. Change a few default arguments
-        if symbol in self.children.keys() :
-            symbol = self.children[symbol]
-            default_order[c.SYMBOL] = symbol
-            order_details.pop(c.SYMBOL)
         if symbol in self.children.values():
-            default_order[c.ASSET_CLASS] = c.STRATEGY
-            default_order[c.EVENT_SUBTYPE] = c.CASHFLOW
-            default_order[c.CREDIT] = -decimal.Decimal(quantity) if quantity < 0 else 0
-            default_order[c.DEBIT] = decimal.Decimal(quantity) if quantity > 0 else 0
-            default_order[c.QUANTITY_FILLED] = default_order.pop(c.QUANTITY_OPEN)
+            notional = order.get(c.NOTIONAL) or order.get(c.QUANTITY)
+            order[c.ASSET_CLASS] = c.STRATEGY
+            order[c.EVENT_SUBTYPE] = c.CASHFLOW
+            order[c.CREDIT] = -decimal.Decimal(notional) if notional < 0 else 0
+            order[c.DEBIT] = decimal.Decimal(notional) if notional > 0 else 0
+            # cash flow order = filled order
+            order[c.QUANTITY_FILLED] = notional
 
-        order = {**default_order, **order_details}
-
-        return Event.order_event(order)
+        return order
 
     def internalize_order(self, order):
         """ Returns a copy of the order for internal processing.
@@ -1158,11 +1165,14 @@ class Strategy(event_handler.EventHandler):
 
         # pad order with default args: This is to create a properly formatted order, and create a position if none exists yet.
         # Note that create_order automatically converts any child symbols to child strategy_ids
-        order = order or {}
-        symbol = symbol or order.get(c.SYMBOL)
-        quantity = quantity or order.get(c.QUANTITY)
-        order = self.create_order(symbol = symbol, quantity = quantity, order_details = order)
-        order = self.externalize_order(order)
+        if order is None:
+            order = OrderEvent.market_order(symbol, quantity)
+        # order = order or {}
+        # symbol = symbol or order.get(c.SYMBOL)
+        # quantity = quantity or order.get(c.QUANTITY)
+
+
+        order = self.prepare_order(order, position = None)
         self.positions_handle_order(order)
         # PLACE THE ORDER
         if order[c.SYMBOL] in self.children.values():

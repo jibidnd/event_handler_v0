@@ -7,6 +7,7 @@ import datetime
 import pytz
 import zmq
 
+from ..event_handler import Event
 from .. import utils
 from ..utils import constants as c
 
@@ -161,36 +162,32 @@ class DataFeedQuery:
     @staticmethod
     def BarQuery(
             symbol,
-            connection_type = 'REST',
             start = pytz.timezone('America/New_York').localize(datetime.datetime(2020, 1, 1, 0, 0)).isoformat(),
             end = pytz.timezone('America/New_York').localize(datetime.datetime(2020, 1, 31, 0, 0)).isoformat(),
             multiplier = 1,
             resolution = 'm',
-            align = c.RIGHT):
+            alignment = c.LEFT):
             
         q = {
             c.DATA_TYPE: c.BAR,
             c.SYMBOL: symbol,
-            c.CONNECTION_TYPE: connection_type,
             c.START: start,
             c.END: end,
             c.MULTIPLIER: multiplier,
             c.RESOLUTION: resolution,
-            c.ALIGN: align
+            c.ALIGNMENT: alignment
             }
         return q
 
     @staticmethod
     def QuoteQuery(
             symbol,
-            connection_type = 'REST',
             start = pytz.timezone('America/New_York').localize(datetime.datetime(2020, 1, 1, 0, 0)).isoformat(),
             end = pytz.timezone('America/New_York').localize(datetime.datetime(2020, 1, 31, 0, 0)).isoformat()):
             
         q = {
             c.DATA_TYPE: c.QUOTE,
             c.SYMBOL: symbol,
-            c.CONNECTION_TYPE: connection_type,
             c.START: start,
             c.END: end
             }
@@ -199,15 +196,113 @@ class DataFeedQuery:
     @staticmethod
     def TickQuery(
             symbol,
-            connection_type = 'REST',
             start = pytz.timezone('America/New_York').localize(datetime.datetime(2020, 1, 1, 0, 0)).isoformat(),
             end = pytz.timezone('America/New_York').localize(datetime.datetime(2020, 1, 31, 0, 0)).isoformat()):
             
         q = {
             c.DATA_TYPE: c.TICK,
             c.SYMBOL: symbol,
-            c.CONNECTION_TYPE: connection_type,
             c.START: start,
             c.END: end
             }
         return q
+
+class DataEvent:
+    """Subclasses Event to have data-specific events.
+    
+    Each datafeed should return DataEvent objects to keep a consistent
+    format for consumption.
+    """
+    
+    class base_data_event(Event):
+
+        def __init__(
+                self,
+                event_subtype,
+                event_ts):
+
+            super().__init__(
+                event_type = c.DATA,
+                event_subtype = event_subtype,
+                event_ts = event_ts
+            )
+
+            return
+    
+    class bar(base_data_event):
+        def __init__(
+            self,
+            event_ts = None,
+            symbol = None,
+            open_ = None,
+            high = None,
+            low = None,
+            close = None,
+            volume = None):
+
+            super().__init__(event_ts, c.BAR)
+
+            self.update({
+                c.SYMBOL: symbol,
+                c.OPEN: open_,
+                c.HIGH: high,
+                c.LOW: low,
+                c.CLOSE: close,
+                c.VOLUME: volume
+            })
+
+            return
+
+    class quote(base_data_event):
+        def __init__(
+            self,
+            event_ts = None,
+            symbol = None,
+            ask_exchange = None,
+            ask_price = None,
+            ask_size = None,
+            bid_exchange = None,
+            bid_price = None,
+            bid_size = None,
+            quote_conditions = None):
+        
+            super().__init__(event_ts, c.QUOTE)
+
+            self.update({
+                c.SYMBOL: symbol,
+                c.ASK_EXCHANGE: ask_exchange,
+                c.ASK_PRICE: ask_price,
+                c.ASK_SIZE: ask_size,
+                c.BID_EXCHANGE: bid_exchange,
+                c.BID_PRICE: bid_price,
+                c.BID_SIZE: bid_size,
+                c.QUOTE_CONDITIONS: quote_conditions
+            })
+
+            return
+    
+    class tick(base_data_event):
+        def __init__(
+            self,
+            event_ts = None,
+            symbol = None,
+            exchange = None,
+            price = None,
+            size = None,
+            conditions = None,
+            trade_id = None,
+            tape = None):
+        
+            super().__init__(event_ts, c.TICK)
+
+            self.update({
+                c.SYMBOL: symbol,
+                c.EXCHANGE: exchange,
+                c.PRICE: price,
+                c.SIZE: size,
+                c.CONDITIONS: conditions,
+                c.TRADE_ID: trade_id,
+                c.TAPE: tape
+            })
+
+            return

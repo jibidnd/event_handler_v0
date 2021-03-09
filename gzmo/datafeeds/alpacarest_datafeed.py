@@ -80,6 +80,10 @@ class AlpacaRestDataFeed(BaseDataFeed):
         """Translate the query from standard format to Alpaca specific format."""
         _query = {**query}
 
+        _query['start'] = _query.pop(c.START)
+        _query['end'] = _query.pop(c.END)
+        _query['symbol'] = _query.pop(c.SYMBOL)
+
         if (_query.get(c.MULTIPLIER) or 1) != 1:
             raise NotImplementedError('Multipliers other than 1 are not supported.')
         
@@ -93,7 +97,7 @@ class AlpacaRestDataFeed(BaseDataFeed):
 
         return _query
 
-    def execute_query(self, live = False):
+    def execute_query(self):
         """Make the connection and get ready to emit data."""    
         
         # Need to NOT encode the colon
@@ -121,11 +125,10 @@ class AlpacaRestDataFeed(BaseDataFeed):
             self.request_params['page_token'] = token
 
         self.from_beginning = False
-        print(resp)
         return resp
     
-    @staticmethod
-    def format_result(result, event_subtype, additional_info = None):
+    # @staticmethod
+    def format_result(self, result, event_subtype, additional_info = None):
         
         _result = {**result}
         if additional_info is None:
@@ -133,7 +136,6 @@ class AlpacaRestDataFeed(BaseDataFeed):
         
         # this is a data event
         _result[c.EVENT_TYPE] = c.DATA
-        # bar/quote/tick
 
         if event_subtype == c.BAR:
             # bars
@@ -143,7 +145,19 @@ class AlpacaRestDataFeed(BaseDataFeed):
             _result[c.LOW] = _result.pop('l')
             _result[c.CLOSE] = _result.pop('c')
             _result[c.VOLUME] = _result.pop('v')
-            _result[c.EVENT_TS] = pd.Timestamp(_result.pop('t')).isoformat()
+            if self.query[c.ALIGNMENT] == c.LEFT:
+                _result[c.EVENT_TS] = pd.Timestamp(_result.pop('t')).isoformat()
+                _result[c.ALIGNMENT] = c.LEFT
+            elif self.query[c.ALIGNMENT] == c.RIGHT:
+                offset = pd.Timedelta(value = self.query[c.MULTIPLIER], unit = self.query[c.RESOLUTION])
+                _result[c.EVENT_TS] = (pd.Timestamp(_result.pop('t')) + offset).isoformat()
+                _result[c.ALIGNMENT] = c.RIGHT
+            elif self.query[c.ALIGNMENT] == c.CENTER:
+                offset = pd.Timedelta(value = self.query[c.MULTIPLIER], unit = self.query[c.RESOLUTION]) / 2
+                _result[c.EVENT_TS] = (pd.Timestamp(_result.pop('t')) + offset).isoformat()
+                _result[c.ALIGNMENT] = c.CENTER
+            else:
+                raise NotImplementedError(f"Expected one of 'LEFT', 'RIGHT', or 'CENTER' for bar aligntment. Got '{self.query[c.ALIGNMENT]}' instead")
         elif event_subtype == c.QUOTE:
             # quotes
             _result[c.EVENT_SUBTYPE] = c.QUOTE
@@ -168,6 +182,7 @@ class AlpacaRestDataFeed(BaseDataFeed):
             _result[c.TAPE] = _result.pop('z')
         else:
             pass
+
         
         return _result
         
@@ -212,7 +227,6 @@ class AlpacaRestDataFeed(BaseDataFeed):
                     # if there is no page_token, it means we're done.
                     self.is_finished = True
                     break
-
         # return a list only if limit > 1
         if limit > 1:
             return res
@@ -221,7 +235,3 @@ class AlpacaRestDataFeed(BaseDataFeed):
                 return res[0]
             else:
                 return
-    
-    def format_record(self, result):
-        # TODO
-        pass

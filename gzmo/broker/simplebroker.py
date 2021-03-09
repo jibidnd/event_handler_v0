@@ -22,7 +22,9 @@ TODO:
 
 """
 import copy
+from collections import deque
 
+import pandas as pd
 import zmq
 
 from . import BaseBroker
@@ -30,8 +32,8 @@ from .. import utils
 from ..utils import constants as c
 
 class SimpleBroker(BaseBroker):
-    """A simple broker to simulate taking and filling market and limit orders.
-    """    
+    """A simple broker to simulate taking and filling market and limit orders."""
+    
     def __init__(self, name, fill_method, zmq_context = None):
         """Inits a simple broker.
 
@@ -41,11 +43,14 @@ class SimpleBroker(BaseBroker):
         """  
         super().__init__(name, zmq_context)
         self.fill_method = fill_method
+        self.open_orders = {}               # better to refer to orders by id so we can refer to the same order even if attributes change
+        self.closed_orders = []
+        self.data_cache = deque()           # to handle left- or center- aligned bars
     
     # ----------------------------------------------------------------------------------------
     # Event handling
     # ----------------------------------------------------------------------------------------
-    def _handle_data(self, data):
+    def _process_data(self, data):
         """Tries to fill existing open orders against incoming data.
 
             Note that data is expected to be right-aligned (EVENT_TS marks the end of the event).
@@ -63,38 +68,24 @@ class SimpleBroker(BaseBroker):
                 order_packed = utils.packb(order)
                 self.order_socket.send(order_packed, flags = zmq.NOBLOCK)
 
-        return self.handle_data(data)
+        self.process_data(data)
+        return
 
-    def _handle_order(self, order):
-        """Handles an incoming order.
+    def place_order(self, order):
+        """Handles an incoming order and respond with a "RECEIVED" order event.
 
         Args:
             order (dict): ORDER event.
         """
-        order_response = self.take_order(order)
-        if (order_response is not None) and (self.order_socket is not None):
-            # emit the response if there is any
-            order_response_packed = utils.packb(order_response)
-            self.order_socket.send(order_response_packed, flags = zmq.NOBLOCK)
-        return self.handle_order(order)
-
-    def take_order(self, order):
-        """Processes an incoming order.
-
-        Args:
-            order (dict): Incoming ORDER event.
-
-        Returns:
-            order: Response in the form of an ORDER event.
-        """        
+        response = None
         # make a copy because we don't want to break things elsewhere.
         _order = copy.deepcopy(order)
-        if _order[c.EVENT_SUBTYPE] == c.REQUESTED:
+        if (order_type := _order[c.EVENT_SUBTYPE]) == c.REQUESTED:
             if _order[c.ORDER_TYPE] in [c.MARKET, c.LIMIT]:
                 # Add to open orders
                 order_id = _order[c.ORDER_ID]
                 # change order status to subitted
-                _order[c.EVENT_SUBTYPE] = c.SUBMITTED
+                _order[c.EVENT_SUBTYPE] = c.RECEIVED
                 # add quantity open field if none set
                 if _order.get(c.QUANTITY_OPEN) is None:
                     _order[c.QUANTITY_OPEN] = _order[c.QUANTITY]
@@ -105,20 +96,29 @@ class SimpleBroker(BaseBroker):
 
                 # acknowledge acceptance of order (with submitted status)
                 # copy because we don't want others to break our internal record of the order
-                return copy.deepcopy(_order)
+                response = copy.deepcopy(_order)
 
-            elif _order[c.ORDER_TYPE] == c.CANCELLATION:
+            elif order_type == c.CANCELLATION:
                 # remove from open orders and acknowledge cancellation
                 try:
                     cancelled_order = self.open_orders.pop(_order[c.ORDER_ID])
-                    cancelled_order = _order.update({c.EVENT_TS: self.clock, c.EVENT_SUBTYPE: c.CANCELLED})
+                    cancelled_order.update({c.EVENT_TS: self.clock, c.EVENT_SUBTYPE: c.CANCELLED})
                 except KeyError:
                     # let the requester know if there is nothing to cancel
-                    cancelled_order = _order.update({c.EVENT_TS: self.clock, c.EVENT_SUBTYPE: c.INVALID})
+                    cancelled_order = _order
+                    cancelled_order.update({c.EVENT_TS: self.clock, c.EVENT_SUBTYPE: c.INVALID})
                 finally:
                     # copy because we don't want others to break our internal record of the order
-                    return copy.deepcopy(cancelled_order)
+                    response = copy.deepcopy(cancelled_order)
+            
+            else:
+                raise NotImplementedError(f'Order type {order_type} not supported')
 
+        if (response is not None) and (self.order_socket is not None):
+            # emit the response if there is any
+            response_packed = utils.packb(response)
+            self.order_socket.send(response_packed, flags = zmq.NOBLOCK)
+        return
 
     def try_fill_with_data(self, data):
         """ Tries to fill all currently open orders against data.
@@ -176,35 +176,59 @@ def immediate_fill(order, data, fill_strategy = c.CLOSE, commission = 0.0):
                 return the fill price.
             Defaults to c.CLOSE.
     """    
-    # time.sleep(0.1)
+
     assert order.get(c.QUANTITY_OPEN) != 0, 'Nothing to fill.'
-    # calculate fill price
+
+    # if it is a bar, check if the order is eligible to be filled by the bar
+    # need the bar to be completely after the order
+    if data[c.EVENT_SUBTYPE] == c.BAR:
+        if data[c.ALIGNMENT] == c.LEFT:
+            offset = pd.Timedelta(value = 0, unit = data[c.RESOLUTION])
+        elif data[c.ALIGNMENT] == c.CENTER:
+            offset = -pd.Timedelta(value = data[c.MULTIPLIER], unit = data[c.RESOLUTION]) / 2
+        elif data[c.ALIGNMENT] == c.RIGHT:
+            offset = -pd.Timedelta(value = data[c.MULTIPLIER], unit = data[c.RESOLUTION])
+        else:
+            raise NotImplementedError(f"Expected one of 'LEFT', 'RIGHT', or 'CENTER' for bar aligntment. Got '{data[c.ALIGNMENT]}' instead")
+        
+        if (bar_begin := data[c.EVENT_TS] + offset) < order[c.EVENT_TS]:
+            return False
+
+    is_buy = order[c.QUANTITY_OPEN] > 0
+
+    # calculate fillable price
     p = None
     if order[c.ORDER_TYPE] == c.MARKET:
         if data[c.EVENT_SUBTYPE] == c.BAR:
-            p = data[fill_strategy]
+            if is_buy:
+                p = data[c.HIGH]
+            else:
+                p = data[c.LOW]
         elif data[c.EVENT_SUBTYPE] == c.TICK:
-            p = data[fill_strategy]
+            p = data[c.PRICE]
         elif data[c.EVENT_SUBTYPE] == c.QUOTE:
-            p = data[fill_strategy]
+            if is_buy:
+                p = data[c.ASK_PRICE]
+            else:
+                p = data[c.BID_PRICE]
     elif order[c.ORDER_TYPE] == c.LIMIT:
         if data[c.EVENT_SUBTYPE] == c.BAR:
-            if data[c.EVENT_SUBTYPE] == c.BAR:
-                # If long, fill if limit price <= high
-                # if short, fill if limit price >= low
-                if ((order[c.QUANTITY] > 0) and (order[c.PRICE] <= data[c.HIGH])) or \
-                    ((order[c.QUANTITY] < 0) and (order[c.PRICE >= data[c.LOW]])):
-                    p = order[c.PRICE]
+            # fill at limit price (as opposed to best possible price)
+            if ((is_buy) and (data[c.LOW] <= order[c.LIMIT_PRICE])) or \
+                    ((not is_buy) and (data[c.HIGH] >= order[c.LIMIT_PRICE])):
+                p = order[c.LIMIT_PRICE]
         elif data[c.EVENT_SUBTYPE] == c.TICK:
-                if ((order[c.QUANTITY] > 0) and (order[c.PRICE] <= data[fill_strategy])) or \
-                    ((order[c.QUANTITY] < 0) and (order[c.PRICE >= data[fill_strategy]])):
-                    p = data[fill_strategy]
+            if ((is_buy) and (data[c.PRICE] <= order[c.LIMIT_PRICE])) or \
+                    ((not is_buy) and (data[c.PRICE] >= order[c.LIMIT_PRICE])):
+                p = data[c.LIMIT_PRICE]
         elif data[c.EVENT_SUBTYPE] == c.QUOTE:
-                if ((order[c.QUANTITY] > 0) and (order[c.PRICE] >= data[c.ASK])) or \
-                    ((order[c.QUANTITY] < 0) and (order[c.PRICE <= data[c.BID]])):
-                    p = data[fill_strategy]
+            if ((is_buy) and (data[c.ASK_PRICE] <= order[c.PRICE])) or \
+                ((not is_buy) and (data[c.BID_PRICE] >= order[c.PRICE])):
+                p = data[c.LIMIT_PRICE]
         else:
             raise NotImplementedError
+    else:
+        raise NotImplementedError
     
     if p is not None:
         # note that dictionaries are mutable
@@ -213,10 +237,10 @@ def immediate_fill(order, data, fill_strategy = c.CLOSE, commission = 0.0):
         order[c.QUANTITY_OPEN] -= q
         order[c.QUANTITY_FILLED] += q
         # update the fill price
-        order[c.CREDIT] += (-q) * p if q < 0 else 0
-        order[c.DEBIT] += q * p if q > 0 else 0
-        order[c.AVERAGE_PRICE] = abs(order[c.CREDIT] - order[c.DEBIT]) / order[c.QUANTITY_FILLED]
-        order[c.EVENT_TS] = data[c.EVENT_TS] #+ data[c.MULTIPLIER] * data[c.RESOLUTION] / 2
+        order[c.CREDIT] += (-q) * p if (not is_buy) else 0
+        order[c.DEBIT] += q * p if (is_buy) else 0
+        order[c.AVERAGE_FILL_PRICE] = abs(order[c.CREDIT] - order[c.DEBIT]) / order[c.QUANTITY_FILLED]
+        order[c.EVENT_TS] = data[c.EVENT_TS]
         return True
     else:
         return False
