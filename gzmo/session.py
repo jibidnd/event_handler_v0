@@ -4,6 +4,7 @@ from collections import deque
 import threading
 import time
 import zmq
+from zmq.sugar.socket import Socket
 
 from . import utils
 from .utils import constants as c
@@ -799,15 +800,42 @@ def communication_proxy(address, capture = None, context = None, shutdown_flag =
 
     return
 
+class CommunicationProxyEmulator:
+    def __init__(self, shutdown_flag = None):
+
+        self.shutdown_flag = shutdown_flag or threading.Event()
+        self.sockets = {}
+
+    def add_party(self, ident):
+        self.sockets[ident] = SocketEmulator(unpack = True)
+    
+    def run(self):
+        while not self.shutdown_flag.is_set():
+            for socket in self.sockets:
+                if socket.deq_in:
+                    message_unpacked = socket.deq_in.popleft()
+                    if (receiver := message_unpacked.get(c.RECEIVER_ID)) is None:
+                        raise Exception('No receiver for message specified')
+                    if receiver not in self.sockets.keys():
+                        raise Exception(f'Receiver {receiver} not found.')
+                    # attach a packed message for receiving at the receiver's socket
+                    self.sockets[receiver].deq_out.append(utils.packb(message_unpacked))
+
+
 class SocketEmulator:
-    def __init__(self, deq_in = None, deq_out = None):
+    def __init__(self, deq_in = None, deq_out = None, unpack = False):
         """A class to emulate strategy sockets for communication.
-            Doesn't fully emulate dealer-router type sockets, as one cannot extract the sender identity.
-            Sender should include SENDER_ID or RECEIVER_ID in the message in those cases.
+            For two-way communications, a proxy should be implemented to have two `SocketEmulator`s
+            and pass events between the two.
 
         Args:
-            deq (collection.deque instance, optional): The deque to append received events to. Defaults to None.
+            deq_in (collection.deque instance, optional): The deque to append events sent to the socket.
+                Defaults to None.
+            deq_in (collection.deque instance, optional): The deque to append events to be received from the socket.
+                Defaults to None.
         """
+        self.unpack = unpack
+
         if deq_in is not None:
             self.deq_in = deq_in
         else:
@@ -819,11 +847,16 @@ class SocketEmulator:
             self.deq_out = deque()
 
     def send(self, item):
-        self.deq_in.append(utils.unpackb(item))
+        if self.unpack:
+            self.deq_in.append(utils.unpackb(item))
+        else:
+            self.deq_in.append(item)
 
     def send_multipart(self, items):
-        item = items[1]
-        self.deq_in.append(utils.unpackb(item))
+        if self.unpack:
+            self.deq_in.append(utils.unpackb(items))
+        else:
+            self.deq_in.append(items)
 
     def recv(self):
         if self.deq_out:
