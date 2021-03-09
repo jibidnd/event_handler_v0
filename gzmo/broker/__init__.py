@@ -37,6 +37,11 @@ class BaseBroker(event_handler.EventHandler):
         main_shutdown_flag (threading.Event): If threading is used, this event can be set to signal that the main session has shut down.
         shutdown_flag (threading.Event): If threading is used, this event can be set to signal the broker to shut down.
         clock (decimal.Decimal): UTC timestamp to keep track of time.
+    
+    Methods:
+        format_order_in: formats order to internal formats.
+        format_order_out: formats order to external (broker specific) formats.
+        place_order: places the order to the broker and sends any response to order_socket (called by _process_order).
     """
 
     def __init__(self, name, auth = None, zmq_context = None):

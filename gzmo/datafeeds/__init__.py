@@ -30,6 +30,12 @@ class BaseDataFeed:
                 start all the datafeeds, and `set` the threading.Event() instance.
             main_shutdown_flag (threading.Event): If threading is used, this event can be set to signal that the main session has shut down.
             shutdown_flag (threading.Event): If threading is used, this event can be set to signal the datafeed to shut down.
+        
+        Methods:
+            format_query: formats the query to the format accepted by the external datafeed.
+            execute_query: makes the connection and execute the query for results.
+            format_result: formats the received results to internal format.
+            fetch: returns records from the retrieved results (called by publishfetch).
     """
 
     def __init__(self, topic, query, auth = None, zmq_context = None):
