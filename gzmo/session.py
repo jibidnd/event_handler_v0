@@ -800,6 +800,36 @@ def communication_proxy(address, capture = None, context = None, shutdown_flag =
 
     return
 
+class BrokerProxyEmulator:
+    def __init__(self, shutdown_flag = None, default_broker = None):
+
+        self.shutdown_flag = shutdown_flag or threading.Event()
+        self.sockets = {}
+        self.default_broker = default_broker
+
+    def add_party(self, ident):
+        self.sockets[ident] = SocketEmulator(unpack = True)
+    
+    def clear_queues(self):
+        for socket in self.sockets:
+            if socket.deq_in:
+                order_unpacked = socket.deq_in.popleft()
+                # REQUESTED ==> from strategy
+                if (order_type := order_unpacked[c.EVENT_SUBTYPE]) == c.REQUESTED:
+                    if (broker := order_unpacked.get(c.BROKER)) is None:
+                        broker = self.default_broker
+                    if broker is None:
+                        raise Exception('Either specify broker in order or specify default broker in session.')
+                    self.sockets[broker].deque_out.append(utils.packb(order_unpacked))
+                else:
+                    strategy = order_unpacked[c.STRATEGY_CHAIN][-1]
+                    self.sockets[strategy].deque_out.append(utils.packb(order_unpacked))
+    
+    def run(self):
+        while not self.shutdown_flag.is_set():
+            self.clear_queues()
+
+
 class CommunicationProxyEmulator:
     def __init__(self, shutdown_flag = None):
 
@@ -808,18 +838,21 @@ class CommunicationProxyEmulator:
 
     def add_party(self, ident):
         self.sockets[ident] = SocketEmulator(unpack = True)
+
+    def clear_queues(self):
+        for socket in self.sockets:
+            if socket.deq_in:
+                message_unpacked = socket.deq_in.popleft()
+                if (receiver := message_unpacked.get(c.RECEIVER_ID)) is None:
+                    raise Exception('No receiver for message specified')
+                if receiver not in self.sockets.keys():
+                    raise Exception(f'Receiver {receiver} not found.')
+                # attach a packed message for receiving at the receiver's socket
+                self.sockets[receiver].deq_out.append(utils.packb(message_unpacked))
     
     def run(self):
         while not self.shutdown_flag.is_set():
-            for socket in self.sockets:
-                if socket.deq_in:
-                    message_unpacked = socket.deq_in.popleft()
-                    if (receiver := message_unpacked.get(c.RECEIVER_ID)) is None:
-                        raise Exception('No receiver for message specified')
-                    if receiver not in self.sockets.keys():
-                        raise Exception(f'Receiver {receiver} not found.')
-                    # attach a packed message for receiving at the receiver's socket
-                    self.sockets[receiver].deq_out.append(utils.packb(message_unpacked))
+            self.clear_queues()
 
 
 class SocketEmulator:
