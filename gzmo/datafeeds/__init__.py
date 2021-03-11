@@ -53,7 +53,7 @@ class BaseDataFeed:
         self.is_finished = False
         self.main_shutdown_flag = threading.Event()
         self.shutdown_flag = threading.Event()
-        self.sock_out = None
+        self.publishing_socket = None
 
         # Get auth file if a path if provided
         if isinstance(auth, str):
@@ -72,10 +72,10 @@ class BaseDataFeed:
         """
         self.address = address
         # Connect to a port
-        self.sock_out = self.zmq_context.socket(zmq.PUB)
+        self.publishing_socket = self.zmq_context.socket(zmq.PUB)
         # Note here we connect to this addres (instead of bind) because we have
         #    a multiple publisher (datafeeds) - one subscriber (session) pattern
-        self.sock_out.connect(address)
+        self.publishing_socket.connect(address)
 
     @abc.abstractmethod
     def format_query(self, query):
@@ -130,7 +130,7 @@ class BaseDataFeed:
                 try:
                     # send the event with a topic
                     res_packed = utils.packb(res)
-                    self.sock_out.send_multipart([self.topic.encode(), res_packed], flag = zmq.NOBLOCK)
+                    self.publishing_socket.send_multipart([self.topic.encode(), res_packed], flag = zmq.NOBLOCK)
                 except zmq.ZMQError as exc:
                     # Drop messages if queue is full
                     if exc.errno == zmq.EAGAIN:
@@ -159,7 +159,7 @@ class BaseDataFeed:
     def shutdown(self):
         """Shuts down gracefully."""
         self.shutdown_flag.set()
-        self.sock_out.close(linger = 10)
+        self.publishing_socket.close(linger = 10)
 
 
 class DataFeedQuery:
