@@ -208,6 +208,7 @@ class AlpacaRestDataFeed(BaseDataFeed):
         if self.from_beginning:
             self.execute_query()
 
+        # results to return
         res = []
 
         while (limit is None) or (len(res) < limit):

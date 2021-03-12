@@ -315,7 +315,7 @@ class Session:
                 else:
                     raise Exception('No datafeed to set up.')
                 
-                self.synced_datafeed.publishing_socket = self.proxies[c.DATA].add_publisher('synced feed')
+                self.synced_datafeed.publishing_socket = self.proxies[c.DATA].add_publisher('synced_feed')
         
         return
 
@@ -380,59 +380,38 @@ class Session:
                 strategy.communication_socket = self.proxies[c.COMMUNICATION].add_party(
                     strategy.strategy_id)
             
-            # start threads if not syncing
-            if not synced:
-                strategy_thread = threading.Thread(target = strategy.run)
-                strategy_thread.daemon = True
-                self.strategy_threads[strategy_id] = strategy_thread
-                # tell the threads to start listening
-                strategy_thread.start()
+            # Things to do before starting to handle events
+            # Could be moving cash around, asking for information, etc.
+            for strategy in self.strategies.values():
+                strategy.start()
+            
+            # start running the strategies so they are ready to receive data
+            strategy_thread = threading.Thread(target = strategy.run)
+            strategy_thread.daemon = True
+            self.strategy_threads[strategy_id] = strategy_thread
+            # tell the threads to start listening
+            strategy_thread.start()
 
         return
 
-    def start(self):
-        """Runs things that need to happen at the start of a backtest/live session.
-        
-        If socket_mode is ALL, a sync flag `datafeed_start_sync` is set so that all datafeeds
-            start publishing at the same time.
-        If socket_mode is STRATEGIES_FULL, STRATEGIES_INTERNALONLY, or NONE, any existing communications
-            are handled before the event loop is started. This may include parent-child set-ups, passing
-            cash, etc.
-        
-        
-        """
-        for strategy in self.strategies.values():
-            strategy.start()
+    def run(self, synced):
+        """Starts the session."""
 
-        if self.socket_mode == c.ALL:
-        # tell datafeeds to start publishing
-        # proxies, brokers, and strategies should all be ready to process events
+        if not synced:
+            # simply tell datafeeds to start publishing
+            # proxies, brokers, and strategies are all already running
             self.datafeed_start_sync.set()
             # wait for datafeeds to finishfor data_thread in self.datafeed_threads:
             for datafeed_thread in self.datafeed_threads:
                 datafeed_thread.join()
-        
-        elif self.socket_mode in [c.STRATEGIES_FULL, c.STRATEGIES_INTERNALONLY, c.NONE]:
-
-            # handle any communication event before start
-            # e.g. passing cash, etc
-            while True:
-                try:
-                    communication_event = self.communication_deque.popleft()
-                    try:
-                        receiver = communication_event[c.RECEIVER_ID]
-                    except KeyError:
-                        raise Exception('No receiver specified for communication event\n', communication_event)
-                    self.strategies[receiver]._handle_event(communication_event)
-                except IndexError:
-                    # nothing else to handle
-                    break
-                except:
-                    raise
-            
-            self.process_events(self.socket_mode)
         else:
-            raise NotImplementedError(f'socket_mode {self.socket_mode} not implemented')
+            while not self.main_shutdown_flag.is_set():
+                had_activity = self.next()
+                if not had_activity:
+                    break
+        
+        self.main_shutdown_flag.set()
+        return
 
     def shutdown(self, linger = 0.1):
         """Exits gracefully."""
@@ -456,139 +435,39 @@ class Session:
         time.sleep(linger)
         self.zmq_context.destroy()
     
-    def process_events(self, socket_mode):
-        """Performs the main event loop in a synced manner.
-
-        A method for socket_mode in ['STRATEGIES_FULL', 'STRATEGIES_INTERNALONLY', 'NONE'].
+    def next(self):
+        """Iterates one cycle of the main event loop
 
         The event loop is as follows:
+            - clear communications queues
+            - clear order queues
+            - 
             - broker handle orders from strategies; send any response
             - get data
             - send data
             - broker handle data; send any response
         """
-        # check socket type
-        if socket_mode == c.ALL:
-            raise NotImplementedError('socket_mode = "ALL" is not implemented in process_events.')
-        elif socket_mode not in [c.STRATEGIES_FULL, c.STRATEGIES_INTERNALONLY, c.NONE]:
-            raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
 
-        while not self.main_shutdown_flag.is_set():
-            # STEP 1: BROKER HANDLE ORDERS
-            # -----------------------------------------------------------------------------------------------------
-            # try to get (all) orders from strategies
-            # get from order socket if we're using sockets
-            if socket_mode == c.STRATEGIES_FULL:
-                while True:
-                    try:
-                        strategy_id_encoded, order_packed = self.broker_strategy_socket.recv_multipart(zmq.NOBLOCK)
-                        order_unpacked = utils.unpackb(order_packed)
-                        
-                        # find a broker
-                        if (broker := order_unpacked.get(c.BROKER)) is None:
-                            broker = next(iter(self.brokers.values()))
-                        # have broker handle the order
-                        if (response := broker.take_order(order_unpacked)) is not None:
-                            # prepare the response
-                            response_packed = utils.packb(response)
-                            original_sender = response[c.STRATEGY_CHAIN][-1]
-                            original_sender_encoded = original_sender.encode('utf-8')
-                            # send the response
-                            msg = self.broker_strategy_socket.send_multipart([original_sender_encoded, response_packed], copy = False, track = True)
-                            msg.wait()
-                    
-                    except zmq.ZMQError as exc:
-                        if exc.errno == zmq.EAGAIN:
-                            # nothing to get
-                            break
-                        else:
-                            raise
-            
-            # otherwise orders will be in the order deque
-            # handle in FIFO manner
-            else:
-                while True:
-                    try:
-                        order = self.order_deque.popleft()
+        # flag to keep track of activities
+        had_data = False
+        # Assume starting with all clear queues: no unhandled data, orders, or communications
+        # First get the next data event
+        if (data := self.synced_datafeed.fetch()) is not None:
+            had_data = True
+            topic = data[c.TOPIC]
+            self.proxies[c.DATA].sockets_publisher['synced_feed'].deq_in.append([topic, data]) # proxy will take unpacked data
+            # Pass down the data
+            self.proxies[c.DATA].clear_queues()
+            # At this point, brokers will have tried to fill orders with the data/cached the data,
+            #   and strategies will have processed the data event and placed any orders
+            # Allow strategies to pass on any communications/orders
+            self.proxies[c.COMMUNICATION].clear_queues()
+            # pass any orders to the broker
+            self.proxies[c.BROKER].clear_queues()
+            # If there are any responses, the parents will want to tell their children
+            self.proxies[c.COMMUNICATION].clear_queues()
 
-                        # find a broker
-                        if (broker := order.get(c.BROKER)) is None:
-                            broker = next(iter(self.brokers.values()))
-                        # have broker handle the order
-                        if (response := broker.take_order(order)) is not None:
-                            # have the strategy handle the response
-                            original_sender = response[c.STRATEGY_CHAIN][-1]
-                            self.strategies[original_sender]._handle_event(response)
-                    
-                    except IndexError:
-                        # nothing to get
-                        break
-                    
-                    except:
-                        raise
-            
-            # STEP 2: GET DATA
-            # -----------------------------------------------------------------------------------------------------
-            # Get next data event
-            if (next_data := self.synced_datafeed.fetch(1)) is None:
-                # if no more data, we're done.
-                self.main_shutdown_flag.set()
-                
-            # STEP 3: BROKERS HANDLE DATA
-            # -----------------------------------------------------------------------------------------------------
-            # Brokers will use new data to fill any outstanding orders / update states
-            else:
-                for broker in self.brokers.values():
-                    fills = broker.try_fill_with_data(next_data)
-                    for fill in fills:
-                        # if STRATEGIES_FULL, send order response via the socket
-                        if socket_mode == c.STRATEGIES_FULL:
-                            # prepare the response
-                            response_packed = utils.packb(fill)
-                            original_sender = fill[c.STRATEGY_CHAIN][-1]
-                            original_sender_encoded = original_sender.encode('utf-8')
-                            msg = self.broker_strategy_socket.send_multipart([original_sender_encoded, response_packed], copy = False, track = True)
-                            msg.wait()
-                        # otherwise directly have the strategy handle the event
-                        else:
-                            self.strategies[fill[c.STRATEGY_CHAIN][-1]]._handle_event(fill)
-
-            # STEP 4: STRATEGIES HANDLE DATA
-            # -----------------------------------------------------------------------------------------------------
-                # if STRATEGIES_FULL, send data via socket
-                if socket_mode == c.STRATEGIES_FULL:
-                    # prepare the data
-                    topic_encoded = next_data[c.TOPIC].encode('utf-8')
-                    data_packed = utils.packb(next_data)
-                    msg = self.data_subscriber_socket.send_multipart([topic_encoded, data_packed], copy = False, track = True)
-                    msg.wait()
-                # otherwise have strategies directly handle the data event
-                else:
-                    for strategy_id, strategy in self.strategies.items():
-                        if next_data[c.TOPIC] in strategy.data_subscriptions:
-                            strategy._handle_event(next_data)
-            # STEP 5: RESOLVE COMMUNICATION
-            # -----------------------------------------------------------------------------------------------------
-            # Send communication to each strategy. Any further communication will be added to self.communication_deque,
-            #   and we will handle this in an infinite loop until there is no more communication (responses)
-            # t0 = time.time()
-            while True:
-                try:
-                    communication_event = self.communication_deque.popleft()
-                    try:
-                        receiver = communication_event[c.RECEIVER_ID]
-                    except KeyError:
-                        raise Exception('No receiver specified for communication event\n', communication_event)
-                    self.strategies[receiver]._handle_event(communication_event)
-                except IndexError:
-                    # nothing else to handle
-                    break
-                except:
-                    raise
-
-        # Done processing all data events; close things
-        self.shutdown()
-        
+        return had_data
 
 class zmq_datafeed_proxy:
     """Relays messages from backend (datafeed producers) to frontend (strategies).
@@ -860,20 +739,34 @@ class BrokerProxyEmulator:
         self.sockets[ident] = SocketEmulator(unpack = True)
         return self.sockets[ident]
     
-    def clear_queues(self):
-        for socket in self.sockets:
-            if socket.deq_in:
-                order_unpacked = socket.deq_in.popleft()
-                # REQUESTED ==> from strategy
-                if (order_type := order_unpacked[c.EVENT_SUBTYPE]) == c.REQUESTED:
-                    if (broker := order_unpacked.get(c.BROKER)) is None:
-                        broker = self.default_broker
-                    if broker is None:
-                        raise Exception('Either specify broker in order or specify default broker in session.')
-                    self.sockets[broker].deque_out.append(utils.packb(order_unpacked))
-                else:
-                    strategy = order_unpacked[c.STRATEGY_CHAIN][-1]
-                    self.sockets[strategy].deque_out.append(utils.packb(order_unpacked))
+    def clear_queues(self, max_iter = 2):
+        """Clears the order queues.
+        
+        Runs until the earlier of:
+            - one full cycle where all sockets have no messages
+            - `max_iter` cycles
+        """
+        has_activities = True
+        i = 0
+        while has_activities and (i < max_iter):
+            # assume there are no events
+            has_activities = False
+            i += 1
+            for socket in self.sockets:
+                if socket.deq_in:
+                    # there was an event. Reset the flag.
+                    has_activities = True
+                    order_unpacked = socket.deq_in.popleft()
+                    # REQUESTED ==> from strategy
+                    if (order_type := order_unpacked[c.EVENT_SUBTYPE]) == c.REQUESTED:
+                        if (broker := order_unpacked.get(c.BROKER)) is None:
+                            broker = self.default_broker
+                        if broker is None:
+                            raise Exception('Either specify broker in order or specify default broker in session.')
+                        self.sockets[broker].deque_out.append(utils.packb(order_unpacked))
+                    else:
+                        strategy = order_unpacked[c.STRATEGY_CHAIN][-1]
+                        self.sockets[strategy].deque_out.append(utils.packb(order_unpacked))
     
     def run(self):
         while not self.shutdown_flag.is_set():
@@ -891,16 +784,29 @@ class CommunicationProxyEmulator:
         self.sockets[ident] = SocketEmulator(unpack = True)
         return self.sockets[ident]
 
-    def clear_queues(self):
-        for socket in self.sockets:
-            if socket.deq_in:
-                message_unpacked = socket.deq_in.popleft()
-                if (receiver := message_unpacked.get(c.RECEIVER_ID)) is None:
-                    raise Exception('No receiver for message specified')
-                if receiver not in self.sockets.keys():
-                    raise Exception(f'Receiver {receiver} not found.')
-                # attach a packed message for receiving at the receiver's socket
-                self.sockets[receiver].deq_out.append(utils.packb(message_unpacked))
+    def clear_queues(self, max_iter = 2):
+        """Clears the order queues.
+        
+        Runs until the earlier of:
+            - one full cycle where all sockets have no messages
+            - `max_iter` cycles
+        """
+        has_activities = True
+        i = 0
+        while has_activities and (i < max_iter):
+            # assume there are no events
+            has_activities = False
+            i += 1
+            for socket in self.sockets:
+                if socket.deq_in:
+                    has_activities = True
+                    message_unpacked = socket.deq_in.popleft()
+                    if (receiver := message_unpacked.get(c.RECEIVER_ID)) is None:
+                        raise Exception('No receiver for message specified')
+                    if receiver not in self.sockets.keys():
+                        raise Exception(f'Receiver {receiver} not found.')
+                    # attach a packed message for receiving at the receiver's socket
+                    self.sockets[receiver].deq_out.append(utils.packb(message_unpacked))
     
     def run(self):
         while not self.shutdown_flag.is_set():
@@ -932,24 +838,28 @@ class SocketEmulator:
             self.deq_out = deque()
 
     def send(self, item):
+        """items are sent here to the socket."""
         if self.unpack:
             self.deq_in.append(utils.unpackb(item))
         else:
             self.deq_in.append(item)
 
     def send_multipart(self, items):
+        """items are sent here to the socket."""
         if self.unpack:
             self.deq_in.append([items[0].decode(), utils.unpackb(items[1])])
         else:
             self.deq_in.append(items)
 
     def recv(self):
+        """items are retrieved from the socket here."""
         if self.deq_out:
             return self.deq_out.popleft()
         else:
             raise zmq.ZMQError(errno = zmq.EAGAIN, msg = 'Socket emulator: Nothing to receive.')
     
     def recv_multipart(self):
+        """items are retrieved from the socket here."""
         if self.deq_out:
             return self.deq_out.popleft()
         else:
