@@ -24,6 +24,16 @@ class SnowflakeDataFeed(BaseDataFeed):
     
     """
     
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.auth = self.auth['snowflake']
+    
+    def format_query(self, query):
+        return super().format_query(query)
+    
+    def format_result(self, result):
+        return super().format_result(result)
+
     def execute_query(self):
         """Execute the query and get ready to emit data."""      
         # Get auth information

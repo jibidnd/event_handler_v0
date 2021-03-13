@@ -309,7 +309,7 @@ class Strategy(event_handler.EventHandler):
             # Add a position for the child strategy
             self.create_position(symbol, asset_class = c.STRATEGY)
             self.children[symbol] = child_strategy_id
-            openpositionsummary = child_strategy_id.get_openpositionsummary()
+            openpositionsummary = child_strategy.get_openpositionsummary()
             self.load_openpositions(openpositionsummary)
 
         elif isinstance(child_strategy, dict):
@@ -376,11 +376,11 @@ class Strategy(event_handler.EventHandler):
     # ----------------------------------------------------------------------------------------------------
     # Session stuff
     # ----------------------------------------------------------------------------------------------------
-    def start(self):
-        """Things to be run before starting to handle events."""
-        return
+    def _before_start(self):
+        # placeholder
+        pass
 
-    def run(self, shutdown_flag = None):
+    def _start(self, shutdown_flag = None):
         """Main event loop to handle events from sockets.
 
         The main event loop continuously checks for events from the communication, data,
@@ -410,9 +410,6 @@ class Strategy(event_handler.EventHandler):
         if shutdown_flag is None:
             shutdown_flag = self.shutdown_flag
             shutdown_flag.clear()
-
-        # start the strategy
-        self.start()
 
         # the event 'queue'
         next_events = {}
@@ -461,20 +458,13 @@ class Strategy(event_handler.EventHandler):
                 self._process_event(next_event)
 
     def _before_stop(self):
-        """Things to execute prior to exiting.
-
-        Gives user a chance to wrap things up and exit clean. To be overridden.
-        Called before `stop` is called.
-        """
         pass
 
     def _stop(self):
         """Exits clean.
 
-        Called after `before_stop` is called.
+        Sets the shutdown floag and closes any open sockets.
         """
-        self.before_stop()
-
         self.shutdown_flag.set()
 
         time.sleep(1)
@@ -508,12 +498,14 @@ class Strategy(event_handler.EventHandler):
         # preprocess received events prior to handling them
 
         # localize the event ts
-        event_ts = event[c.EVENT_TS]
-        if isinstance(event_ts, (int, float, decimal.Decimal)):
-            event_ts = utils.unix2datetime(event_ts, to_tz = self.local_tz)
-        elif isinstance(event_ts, datetime.datetime):
-            event_ts = event_ts.astimezone(self.local_tz)
-        event[c.EVENT_TS] = event_ts
+        # event_ts should already be a pd.Timestamp object from unpacking
+        event[c.EVENT_TS] = event[c.EVENT_TS].astimezone(self.local_tz)
+        # event_ts = event[c.EVENT_TS]
+        # if isinstance(event_ts, (int, float, decimal.Decimal)):
+        #     event_ts = utils.unix2datetime(event_ts, to_tz = self.local_tz)
+        # elif isinstance(event_ts, datetime.datetime):
+        #     event_ts = event_ts.astimezone(self.local_tz)
+        # event[c.EVENT_TS] = event_ts
 
         return self.preprocess_event(event)
 
@@ -986,9 +978,7 @@ class Strategy(event_handler.EventHandler):
         return position
 
     def prepare_order(self, order, position = None):
-        """Creates an order with the provided symbol and quantity.
-
-            Parameters are filled with defaults unless otherwise specified in order_details.
+        """Prepare an order for sending.
 
         Args:
             symbol (str): The symbol to create an order for.

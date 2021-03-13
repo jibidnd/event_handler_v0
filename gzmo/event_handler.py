@@ -12,15 +12,16 @@
 
 import datetime
 import uuid
+import abc
 
 import pandas as pd
 
 from .utils import constants as c
 
 
-class EventHandler:
+class EventHandler(abc.ABC):
     """Base class for classes that handle events.
-    
+
     Event handler is the base class for the main classes: Strategy, Position, and Broker.
     The main function of an event handler is, as the name suggests, handle events. This seeks
     to emulate a real life scenario, where "events" arrive at the code and decisions have to
@@ -47,6 +48,64 @@ class EventHandler:
 
     def __init__(self):
         pass
+    
+    # -------------------------------------------------------------------
+
+    def run(self):
+        self._before_start()
+        self.before_start()
+        self._start()
+        self._before_stop()
+        self.before_stop()
+        self._stop()
+        self.stop()
+        
+    # -------------------------------------------------------------------
+
+    def _before_start(self):
+        """Class internal method for actions prior to starting.
+
+        Called before `before_start`.
+        """
+        pass
+    
+    def before_start(self):
+        """To be overriden for user-defined actions prior to starting.
+
+        e.g. passing cash, warm up data, etc.
+        Called after `_before_start`.
+        """
+        pass
+    
+    def _start(self):
+        """Start the main event loop."""
+    
+    def _before_stop(self):
+        """Class internal method for actions prior to exiting.
+
+        Called before `before_stop`.
+        """
+
+    def before_stop(self):
+        """To be overriden for user-defined actions prior to exiting.
+
+        e.g. cancel open orders, etc
+        Called after `_before_stop`.
+        """
+
+    def _stop(self):
+        """Class internal method for actions when exiting.
+
+        Called before `stop`.
+        """
+
+    def stop(self):
+        """To be overriden for user-defined actions after exiting.
+
+        e.g. return results, etc
+        Called after `_stop`.
+        """
+    # -------------------------------------------------------------------
 
     def _handle_event(self, event):
         "Handles an event."
@@ -55,31 +114,47 @@ class EventHandler:
         self._process_event(event)
         self.handle_event(event)
         return
-    
+
     def handle_event(self, event):
         return
+    
+    # -------------------------------------------------------------------
 
     def _prenext(self):
-        """Things to do prior to receiving the next event.
+        """Class internal method for actions prior to receiving the next event.
 
-        Place holder for internal use. For user-defined events, see `prenext`.
+        Called before `prenext`.
         """
-        return self.prenext()
-    
+        self.prenext()
+        return
+
     def prenext(self):
-        """To be overriden for actions to do before receiving next event."""
+        """To be overriden for user-defined actions prior to receiving the next event.
+
+        Called after `prenext`.
+        """
         return
 
     def _preprocess_event(self, event):
-        # convert to timestamp
-        event[c.EVENT_TS] = event[c.EVENT_TS]
+        """Class internal method for preprocessing an event.
+
+        Called before `prenext`.
+        """
         return self.preprocess_event(event)
-    
+
     def preprocess_event(self, event):
+        """To be overriden for user-defined actions for preprocessing an event.
+
+        Called after `_preprocess_event`.
+        """
         return event
 
     def _process_event(self, event):
-        """process the next event"""
+        """Class internal method for delegating events to be processed.
+
+        Calls one of `_process_data`, `_process_order`, or `_process_communication`
+            depending on the `event_type` of the event, then calls `process_event`.
+        """
         try:
             event_type = event[c.EVENT_TYPE]
         except KeyError:
@@ -93,74 +168,55 @@ class EventHandler:
             self._process_communication(event)
         else:
             raise Exception('Event type {} not supported.'.format(event_type))
-        
+
         self.process_event(event)
-        return 
-    
-    def process_event(self, event):
         return
 
+    def process_event(self, event):
+        """To be overriden for user-defined actions for processing an event.
+
+        Called after `_preprocess_event`.
+        """
+
     def _process_data(self, data):
-        """Processes a data event."""
+        """Processes events with event_type DATA."""
         self.process_data(data)
         return
-    
+
     def process_data(self, data):
-        """Additional action when processing data. To be overriden.
+        """To be overriden for user-defined actions for processing a DATA event.
 
         Called after `_process_data`.
         """
         pass
-    
+
     def _process_order(self, order):
-        """Processes an order event."""
+        """Processes events with event_type ORDER."""
         self.process_order(order)
         return
-    
+
     def process_order(self, order):
-        """Additional action when processing orders. To be overriden.
+        """To be overriden for user-defined actions for processing an ORDER event.
 
         Called after `_process_order`.
         """
         pass
 
     def _process_communication(self, communication):
-        """Handles a communication event."""
+        """Processes events with event_type COMMUNICATION."""
         self.process_communication(communication)
         return
-    
+
     def process_communication(self, communication):
-        """Additional action when processing communication. To be overriden.
+        """To be overriden for user-defined actions for processing a COMMUNICATION event.
 
         Called after `_process_communication`.
         """
         pass
 
-    def _before_stop(self):
-        """Things to execute prior to exiting.
-
-        Gives user a chance to wrap things up and exit clean. To be overridden.
-        Called before `stop` is called.
-        """
-        pass
-    
-    def before_stop(self):
-        """Additional action when exiting.
-
-        Called after `_before_stop`.
-        """
-        pass
-
-    def _stop(self):
-        """Exits clean.
-
-        Called after `before_stop` is called.
-        """
-        return
-
 class Event(dict):
     """Subclasses dict to provide dottable access of properties.
-    
+
     This class provides the general structure of 1 single event.
     It serves as the template for how events should be consumed -- fields to
     expect, structure, etc.
@@ -175,12 +231,11 @@ class Event(dict):
             event_type,
             event_subtype,
             event_ts):
-        
+
         super().__init__()
         self[c.EVENT_TYPE] = event_type
         self[c.EVENT_SUBTYPE] = event_subtype
         self[c.EVENT_TS] = event_ts
-
 
     def __getattr__(self, key):
         """Makes the dot notation available.

@@ -11,7 +11,7 @@ from ..event_handler import Event
 from .. import utils
 from ..utils import constants as c
 
-class BaseDataFeed:
+class BaseDataFeed(abc.ABC):
     """Base datafeed class.
 
         ALL BARS MUST BE RIGHT-EDGE-ALIGNED (timestamp for bar signifies end of bar period).
@@ -96,7 +96,7 @@ class BaseDataFeed:
     def fetch(self, limit = 1):
         pass
     
-    def publish(self):
+    def _start(self):
         """Publishes the queried data to the socket.
 
             The queried data will be published to the socket, record by record, until
@@ -156,7 +156,7 @@ class BaseDataFeed:
 
         return
 
-    def shutdown(self):
+    def _stop(self):
         """Shuts down gracefully."""
         self.shutdown_flag.set()
         self.publishing_socket.close(linger = 10)

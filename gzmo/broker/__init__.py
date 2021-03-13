@@ -152,53 +152,7 @@ class BaseBroker(event_handler.EventHandler):
     # ----------------------------------------------------------------------------------------
     # Event handling
     # ----------------------------------------------------------------------------------------
-    def _process_data(self, data):
-        """Class method to process incoming data events.
-
-        Args:
-            data (dict): Event with EVENT_TYPE = 'DATA'. Likely price/market data.
-        """        
-        pass
-
-    def process_data(self, data):
-        """To be overriden by instance for data-handling specific actions.
-
-        Args:
-            data (dict): Event with EVENT_TYPE = 'DATA'. Likely price/market data.
-        """        
-        pass
-    
-    def _process_order(self, order):
-        """Class method to process an incoming order events.
-
-        Args:
-            order (dict): Event with EVENT_TYPE = 'ORDER'. Should carry order parameters
-                that the broker needs to fill the order.
-        """
-        order_internal = self.format_order_in(order)
-        order_external = self.format_order_out(order)
-
-        # if this is an order request from a strategy
-        if order_internal[c.EVENT_SUBTYPE] == c.REQUESTED:
-            if (response := self._place_order(order_external)) is not None:
-                self._handle_event(response)
-        # otherwise it's a response from the broker. Send it to the strategy
-        else:
-            if (self.order_socket is not None):
-                self.order_socket.send(utils.packb(order_internal))
-        
-        self.process_order(order)
-        return
-
-    def process_order(self, order):
-        """To be overriden by instance for order-handling specific actions.
-
-        Args:
-            data (dict): Event with EVENT_TYPE = 'ORDER'. Should carry order parameters
-                that the broker needs to fill the order.
-        """  
-        pass
-    
+ 
     # @abc.abstractmethod
     def format_order_out(self, order):
         return order
@@ -207,7 +161,7 @@ class BaseBroker(event_handler.EventHandler):
     def format_order_in(self, order):
         return order
 
-    def run(self):
+    def _start(self):
         """Processes events from sockets.
 
             Sequentially process events arriving at the data and order sockets.
@@ -257,7 +211,29 @@ class BaseBroker(event_handler.EventHandler):
 
                 self._handle_event(next_event)
 
-    def shutdown(self):
+    def _process_order(self, order):
+        """Class method to process an incoming order events.
+
+        Args:
+            order (dict): Event with EVENT_TYPE = 'ORDER'. Should carry order parameters
+                that the broker needs to fill the order.
+        """
+        order_internal = self.format_order_in(order)
+        order_external = self.format_order_out(order)
+
+        # if this is an order request from a strategy
+        if order_internal[c.EVENT_SUBTYPE] == c.REQUESTED:
+            if (response := self._place_order(order_external)) is not None:
+                self._handle_event(response)
+        # otherwise it's a response from the broker. Send it to the strategy
+        else:
+            if (self.order_socket is not None):
+                self.order_socket.send(utils.packb(order_internal))
+        
+        self.process_order(order)
+        return
+
+    def _stop(self):
         """Set the shutdown flag and close the sockets.
         """        
         self.shutdown_flag.set()
@@ -369,6 +345,7 @@ class OrderEvent:
             debit = 0,
             commission = 0
         ):
+            pass
 
 
 
@@ -452,7 +429,7 @@ class OrderEvent:
                 event_ts = event_ts
             )
 
-            self[c.ORDER_ID] = order_id or uuid.uuid1()
+            self[c.ORDER_ID] = order_id or str(uuid.uuid1())
 
             # how much to order?
             if quantity is not None:
