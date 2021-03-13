@@ -30,6 +30,12 @@ class BaseDataFeed:
                 start all the datafeeds, and `set` the threading.Event() instance.
             main_shutdown_flag (threading.Event): If threading is used, this event can be set to signal that the main session has shut down.
             shutdown_flag (threading.Event): If threading is used, this event can be set to signal the datafeed to shut down.
+        
+        Methods:
+            format_query: formats the query to the format accepted by the external datafeed.
+            execute_query: makes the connection and execute the query for results.
+            format_result: formats the received results to internal format.
+            fetch: returns records from the retrieved results (called by publishfetch).
     """
 
     def __init__(self, topic, query, auth = None, zmq_context = None):
@@ -47,7 +53,7 @@ class BaseDataFeed:
         self.is_finished = False
         self.main_shutdown_flag = threading.Event()
         self.shutdown_flag = threading.Event()
-        self.sock_out = None
+        self.publishing_socket = None
 
         # Get auth file if a path if provided
         if isinstance(auth, str):
@@ -66,10 +72,10 @@ class BaseDataFeed:
         """
         self.address = address
         # Connect to a port
-        self.sock_out = self.zmq_context.socket(zmq.PUB)
+        self.publishing_socket = self.zmq_context.socket(zmq.PUB)
         # Note here we connect to this addres (instead of bind) because we have
         #    a multiple publisher (datafeeds) - one subscriber (session) pattern
-        self.sock_out.connect(address)
+        self.publishing_socket.connect(address)
 
     @abc.abstractmethod
     def format_query(self, query):
@@ -124,7 +130,7 @@ class BaseDataFeed:
                 try:
                     # send the event with a topic
                     res_packed = utils.packb(res)
-                    self.sock_out.send_multipart([self.topic.encode(), res_packed], flag = zmq.NOBLOCK)
+                    self.publishing_socket.send_multipart([self.topic.encode(), res_packed], flag = zmq.NOBLOCK)
                 except zmq.ZMQError as exc:
                     # Drop messages if queue is full
                     if exc.errno == zmq.EAGAIN:
@@ -153,7 +159,7 @@ class BaseDataFeed:
     def shutdown(self):
         """Shuts down gracefully."""
         self.shutdown_flag.set()
-        self.sock_out.close(linger = 10)
+        self.publishing_socket.close(linger = 10)
 
 
 class DataFeedQuery:

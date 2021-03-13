@@ -1,9 +1,11 @@
 """A session coordinates instances of events, brokers, and strategies."""
 
 from collections import deque
+from gzmo.datafeeds import DataFeedQuery
 import threading
 import time
 import zmq
+from zmq.sugar.socket import Socket
 
 from . import utils
 from .utils import constants as c
@@ -24,8 +26,29 @@ class Session:
             >>> session.brokers.pop('simulator_name')
             >>> session.brokers['live_broker_name'] = live_broker
         
-        Socket modes
+        Session modes
         ============
+        Communication can be done in one of several ways:
+
+        `use_zmq`: Using ZMQ sockets vs using a socket emulator.
+            ZMQ sockets allows programs to be run on different machines and still communicate with each other.
+            However, there is less fine tuned control over the order in which messages are processed, so lags
+            that are inconsequential in real life could cause events to arrive out-of-order in a back test.
+            
+            A socket emulator provides the same interface as a ZMQ socket (send, send_multipart, recv, and recv_multipart),
+            but behind the scenes there is a proxy that directs messages from and to the different sockets that
+            programs connect to. There is more fine tuned control of how messages are processed/cleared, which
+            allows for the following two event processing modes:
+        
+        'synced`: Processing events in a synced manner vs in a as-events-arrive manner.
+            In a backtest, it is possible for processing times that are insignificant in real life to mess up
+            event processing. For example, perhaps sending an order normally takes the strategy 1/10 second. In
+            real life trading, this is likely not an issue, but in a backtest, this could mean that a whole day of bars
+            have passed by the time the order has reached the broker.
+            Because of this, there is a `synced` mode, where each "cycle" of events is cleared before moving onto
+            the next. This is only available when ZMQ sockets are not used.
+        
+
         Communication between strategies, datafeeds, and brokers can be done in one of a few different ways,
         from passing python variables to each other within the same program, to communicating via ZMQ
         sockets as different standalone programs running on different machines. All of these are possible
@@ -80,14 +103,14 @@ class Session:
 
         # instances and threads
         # Strategies
-        self.strategies = {}                        # Strategy instances
-        self.strategy_threads = []
+        self.strategies = {}                        # strategy_id: strategy instances
+        self.strategy_threads = {}                  # strategy_id: straegy thread
 
         # Datafeeds
-        self.datafeeds = []                         # datafeed instances, must have method "run"
-        self.datafeed_threads = []
+        self.datafeeds = {}                         # name: datafeed instances
+        self.datafeed_threads = {}                  # name: datafeed thread
         self.synced_datafeed = None
-        self.data_subscriber_socket = None          # if syncing, the session will act as a datafeed
+        self.data_subscriber_socket = None
 
         self.datafeed_start_sync = threading.Event()
         self.datafeed_publisher_address = None      # datafeeds publish to this address
@@ -96,44 +119,42 @@ class Session:
         
         # Brokers
         self.brokers = {}                           # name: broker instance
-        self.broker_threads = []
-        self.broker_strategy_socket = None          # if syncing, the session will act as a broker
+        self.broker_threads = {}                    # name: broker thread
+        self.broker_strategy_socket = None
 
-        self.broker_broker_address = None           # brokers talk to this address. This will be a router socket.
-        self.broker_strategy_address = None         # strategies talk to this address. This will be a dealer socket.
+        self.broker_broker_address = None           # brokers talk to this address. This will be a router socket / socket emulator
+        self.broker_strategy_address = None         # strategies talk to this address. This will be a router socket / socket emulator
         self.broker_capture_address = None          # not implemented
-        self.order_deque = deque()
-        self.order_socket_emulator = SocketEmulator(self.order_deque)
 
         # Communication channel
         self.communication_address = None
-        self.communication_deque = deque()
-        self.communication_socket_emulator = SocketEmulator(self.communication_deque)
-        self.communication_capture_address = None
+        self.communication_capture_address = None   # not implemented
 
         # Proxies
-        self.proxy_threads = []
+        self.proxies = {}                           # name: proxy instance
+        self.proxy_threads = {}                     # name: proxy thread
         
         # main shutdown flag
         self.main_shutdown_flag = threading.Event()
     
-    def run(self, socket_mode = c.NONE):
+    def run(self, use_zmq = False, synced = True):
         """Sets up infrastructure and runs the strategies.
         
-        See __init__ docstring for documentation on socket_mode.
+        See __init__ docstring for different session modes
         """
 
-        self.socket_mode = socket_mode
+        if use_zmq:
+            assert not synced, 'Cannot use ZMQ in non-synced mode.'
         
-        self.setup_addresses(self.socket_mode)
+        self.setup_addresses(use_zmq)
 
-        self.setup_proxies(self.socket_mode)
+        self.setup_proxies(use_zmq)
 
-        self.setup_datafeeds(self.socket_mode)
+        self.setup_datafeeds(use_zmq, synced)
 
-        self.setup_brokers(self.socket_mode)
+        self.setup_brokers(use_zmq, synced)
 
-        self.setup_strategies(self.socket_mode)
+        self.setup_strategies(use_zmq, synced)
 
         self.start()
 
@@ -148,17 +169,17 @@ class Session:
         """Adds a strategy to the session.
             Note that any child strategies should be added to the session as well.
         """
-        self.strategies[strategy.strategy_id] = strategy
+        self.strategies[strategy.get(c.STRATEGY_ID)] = strategy
     
-    def add_datafeed(self, datafeed):
+    def add_datafeed(self, name, datafeed):
         """Adds data feeds to the session."""
-        self.datafeeds.append(datafeed)
+        self.datafeeds[name] = datafeed
 
     def add_broker(self, broker):
         """Adds a broker to the session."""
         self.brokers[broker.name] = broker
 
-    def setup_addresses(self, socket_mode):
+    def setup_addresses(self, use_zmq):
         """Obtain free tcp addresses for setting up sockets."""
 
         # addresses to avoid
@@ -166,7 +187,7 @@ class Session:
         # inproc was found to be rather unstable for some reason, so we stick with tcp.
         addresses_used = []
 
-        if socket_mode == c.ALL:
+        if use_zmq:
 
             # broker backend
             self.broker_broker_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
@@ -188,37 +209,12 @@ class Session:
             self.communication_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
             addresses_used.append(self.communication_address)
         
-        elif socket_mode == c.STRATEGIES_FULL:
-
-            # broker frontend
-            self.broker_strategy_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
-            addresses_used.append(self.broker_strategy_address)
-
-            # datafeed frontend
-            self.datafeed_subscriber_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
-            addresses_used.append(self.datafeed_subscriber_address)
-
-            # communication channel
-            self.communication_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
-            addresses_used.append(self.communication_address)
-        
-        elif socket_mode == c.STRATEGIES_INTERNALONLY:
-            
-            # communication channel
-            self.communication_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
-            addresses_used.append(self.communication_address)
-        
-        elif socket_mode == c.NONE:
-            
-            pass
-        
         else:
-            
-            raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
+            pass
 
         return
 
-    def setup_proxies(self, socket_mode):
+    def setup_proxies(self, use_zmq, synced):
         """Sets up proxies to relay data, orders, and communications.
         
         The session can have multiple datafeeds or brokers. All should connect
@@ -226,91 +222,104 @@ class Session:
         """
 
         # clear proxies
-        self.proxy_threads = []
+        self.proxy_threads = {}
 
-        if socket_mode == c.ALL:
-            self.proxy_threads.append(threading.Thread(target = pub_sub_proxy, args = (self.datafeed_publisher_address, self.datafeed_subscriber_address, 
-                                                                                        self.datafeed_capture_address, self.zmq_context, self.main_shutdown_flag)))
-            # Add broker proxy to proxy threads
-            default_broker = next(iter(self.brokers.values())).name if len(self.brokers) > 0 else None
-            self.proxy_threads.append(threading.Thread(target = broker_proxy, args = (self.broker_strategy_address, self.broker_broker_address,
-                                                                                        self.broker_capture_address, self.zmq_context, self.main_shutdown_flag, default_broker)))
-            # Add communication_proxy to proxy threads
-            self.proxy_threads.append(threading.Thread(target = communication_proxy, args = (self.communication_address, self.communication_capture_address, self.zmq_context, self.main_shutdown_flag)))
+        if use_zmq:
+            datafeed_proxy = zmq_datafeed_proxy(
+                self.datafeed_publisher_address,
+                self.data_subscriber_socket,
+                self.datafeed_capture_address,
+                self.zmq_context,
+                self.main_shutdown_flag
+            )
+            broker_proxy = zmq_broker_proxy(
+                self.broker_broker_address,
+                self.broker_strategy_address,
+                self.broker_capture_address,
+                self.zmq_context,
+                self.main_shutdown_flag
+            )
+            communication_proxy = zmq_communication_proxy(
+                self.communication_address,
+                self.communication_capture_address,
+                self.zmq_context,
+                self.main_shutdown_flag
+            )
+        
+        else:
+            datafeed_proxy = DatafeedProxyEmulator(shutdown_flag = self.main_shutdown_flag)
+            broker_proxy = BrokerProxyEmulator(shutdown_flag = self.main_shutdown_flag)
+            communication_proxy = CommunicationProxyEmulator(shutdown_flag = self.main_shutdown_flag)
+
+        self.proxies[c.DATA] = datafeed_proxy
+        self.proxies[c.BROKER] = broker_proxy
+        self.proxies[c.COMMUNICATION] = communication_proxy
+
+        # start the proxies if we're not syncing
+        if not synced:
+            self.proxy_threads[c.DATA] = threading.Thread(target = datafeed_proxy.run)
+            self.proxy_threads[c.BROKER] = threading.Thread(target = broker_proxy.run)
+            self.proxy_threads[c.COMMUNICATION] = threading.Thread(target = communication_proxy.run)
 
             # Start the proxies
-            for proxy_thread in self.proxy_threads:
+            for proxy_thread in self.proxy_threads.values():
                 proxy_thread.start()
-        
-        elif socket_mode == c.STRATEGIES_FULL:
-            pass
-        elif socket_mode == c.STRATEGIES_INTERNALONLY:
-            pass
-        elif socket_mode == c.NONE:
-            pass
         else:
-            raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
-        
+            pass
+            
         return
 
-    def setup_datafeeds(self, socket_mode):
-        """Sets up the datafeeds for the different socket_modes.
+    def setup_datafeeds(self, use_zmq, synced):
+        """Sets up the datafeeds.
 
         Sets up the datafeeds so that they know how to emit the data.
-        If socket_mode is ALL, all datafeeds are set to publish to an address in an
+        
+        If not `synced`, all datafeeds are set to publish to an address in an
             unsynced manner. Datafeeds are started when this method is called,
             but a start_sync flag is in place so that the datafeeds do not start publishing
             until the flag is set (in self.start).
-        If socket_mode is STRATEGIES_FULL, STRATEGIES_INTERNALONLY, or NONE,
-            all strategies will be combined into a synced datafeed via DatafeedSynchronizer,
-            and data events will be `fetch`ed from the synced datafeed.
-        """        
+            Datafeeds will emit data as soon as the data is available, without regards to
+            whether the brokers/strategies are done processing prior data.
 
-        if socket_mode == c.ALL:
-            # set up the datafeeds for publishing
-            for datafeed in self.datafeeds:
+        If `synced`, all strategies will be combined into a synced datafeed via
+            DatafeedSynchronizer, and data events will be `fetch`ed from the synced datafeed.
+        
+        """
+        for name, datafeed in self.datafeeds.items():
+            
+            datafeed.shutdown_flag = self.main_shutdown_flag
+            # datafeed will wait for a signcal to all start together
+            datafeed.start_sync = self.datafeed_start_sync
+            
+            # set up connections
+            if use_zmq:
                 datafeed.zmq_context = self.zmq_context
                 datafeed.publish_to(self.datafeed_publisher_address)
-                datafeed.shutdown_flag = self.main_shutdown_flag
-                # datafeed will wait for a signcal to all start together
-                datafeed.start_sync = self.datafeed_start_sync
+            else:
+                datafeed.publishing_socket = self.proxies[c.DATA].add_publisher(name)
+
+            # Start the datafeed if not syncing
+            # Publishing will be blocked until datafeed_start_sync is set.
+            if not synced:
                 datafeed_thread = threading.Thread(target = datafeed.publish)
                 datafeed_thread.daemon = True
-                self.datafeed_threads.append(datafeed_thread)
-                # Start the datafeed. Publishing will be blocked until datafeed_start_sync is set.
-                datafeed_thread.start()
-
-        # If not running in full socket mode, set up the synced datafeed
-        elif socket_mode == c.STRATEGIES_FULL:
-            # if there is more than one datafeed, combine them with DatafeedSynchronizer
-            if len(self.datafeeds) > 1:
-                self.synced_datafeed = DatafeedSynchronizer(datafeeds = self.datafeeds)
-            # else just use the datafeed as the sole datafeed
-            elif len(self.datafeeds) == 1:
-                self.synced_datafeed = self.datafeeds[0]
+                self.datafeed_threads[name] = datafeed_thread
+                datafeed_thread.start()        
+            # else sync the feeds
             else:
-                raise Exception('No datafeed to set up.')
-            
-            self.data_subscriber_socket = self.zmq_context.socket(zmq.PUB)
-            self.data_subscriber_socket.bind(self.datafeed_subscriber_address)
-
-        elif socket_mode in [c.STRATEGIES_INTERNALONLY, c.NONE]:
-
-            # if there is more than one datafeed, combine them with DatafeedSynchronizer
-            if len(self.datafeeds) > 1:
-                self.synced_datafeed = DatafeedSynchronizer(datafeeds = self.datafeeds)
-            # else just use the datafeed as the sole datafeed
-            elif len(self.datafeeds) == 1:
-                self.synced_datafeed = self.datafeeds[0]
-            else:
-                raise Exception('No datafeed to set up.')
-
-        else:
-            raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
+                if len(self.datafeeds) > 1:
+                    self.synced_datafeed = DatafeedSynchronizer(datafeeds = self.datafeeds)
+                # else just use the datafeed as the sole datafeed
+                elif len(self.datafeeds) == 1:
+                    self.synced_datafeed = self.datafeeds[0]
+                else:
+                    raise Exception('No datafeed to set up.')
+                
+                self.synced_datafeed.publishing_socket = self.proxies[c.DATA].add_publisher('synced_feed')
         
         return
 
-    def setup_brokers(self, socket_mode):
+    def setup_brokers(self, use_zmq, synced):
         """Sets up brokers for the different socket_modes.
 
         If socket_mode is ALL, the brokers will connect to an order socket and/or
@@ -321,36 +330,28 @@ class Session:
         If socket_mode is STRATEGIES_INTERNALONLY or NONE, events are handled by
             directly calling the brokers' methods, so no sockets are needed.
         """
-
-        # If running in full socket mode, set up the brokers
-        if socket_mode == c.ALL:
-            for broker in self.brokers.values():
+        for name, broker in self.brokers.items():
+            
+            broker.main_shutdown_flag = self.main_shutdown_flag
+            # set up connections
+            if use_zmq:
                 broker.zmq_context = self.zmq_context
                 broker.connect_data_socket(self.datafeed_subscriber_address)
                 broker.connect_order_socket(self.broker_broker_address)
-                broker.main_shutdown_flag = self.main_shutdown_flag
+            else:
+                broker.data_socket = self.proxies[c.DATA].add_
+                broker.order_socket = self.proxies[c.BROKER].add_party(name)    # returns socket
+            
+            # start threads if not syncing
+            if not synced:
                 broker_thread = threading.Thread(target = broker.run)
                 broker_thread.daemon = True
-                self.broker_threads.append(broker_thread)
+                self.broker_threads[name] = broker_thread
                 broker_thread.start()
-        
-        # if strategies require sockets, also set them up
-        elif socket_mode == c.STRATEGIES_FULL:
-            self.broker_strategy_socket = self.zmq_context.socket(zmq.ROUTER)
-            self.broker_strategy_socket.bind(self.broker_strategy_address)
-        
-        elif socket_mode == c.STRATEGIES_INTERNALONLY:
-            pass
-
-        elif socket_mode == c.NONE:
-            pass
-
-        else:
-            raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
 
         return
 
-    def setup_strategies(self, socket_mode):
+    def setup_strategies(self, use_zmq, synced):
         """Sets up strategies for the different socket_modes.
         
         If socket_mode is ALL or STRATEGIES_FULL, all of the strategies' communication
@@ -363,91 +364,54 @@ class Session:
             were sent to ZMQ sockets.
         
         """
-        for strategy in self.strategies.values():
+        for strategy_id, strategy in self.strategies.items():
             strategy.zmq_context = self.zmq_context
             strategy.shutdown_flag = self.main_shutdown_flag
 
-            if socket_mode in [c.ALL, c.STRATEGIES_FULL]:
-                
-                # receiving data
+            # set up sockets
+            if use_zmq:
                 strategy.connect_data_socket(self.datafeed_subscriber_address)
-                strategy_thread = threading.Thread(target = strategy.run)
-                strategy_thread.daemon = True
-                self.strategy_threads.append(strategy_thread)
-                
-                # communication with broker
                 strategy.connect_order_socket(self.broker_strategy_address)
-                
-                # communication with other strategies
                 strategy.connect_communication_socket(self.communication_address)
-
-                # tell the threads to start listening
-                strategy_thread.start()
-            
-            elif socket_mode == c.STRATEGIES_INTERNALONLY:
-                
-                # Communication with broker
-                strategy.order_socket = self.order_socket_emulator
-
-                # communication with other strategies
-                strategy.connect_communication_socket(self.communication_address)
-
-            elif socket_mode == c.NONE:
-                
-                # Communication with broker
-                strategy.order_socket = self.order_socket_emulator
-
-                # connect to the socket emulator
-                strategy.communication_socket = self.communication_socket_emulator
-            
             else:
-                raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
+                strategy.data_socket = self.proxies[c.DATA].add_subscriber(
+                    strategy.strategy_id, strategy.data_subscriptions)
+                strategy.order_socket = self.proxies[c.ORDER].add_party(strategy.strategy_id)
+                strategy.communication_socket = self.proxies[c.COMMUNICATION].add_party(
+                    strategy.strategy_id)
+            
+            # Things to do before starting to handle events
+            # Could be moving cash around, asking for information, etc.
+            for strategy in self.strategies.values():
+                strategy.start()
+            
+            # start running the strategies so they are ready to receive data
+            strategy_thread = threading.Thread(target = strategy.run)
+            strategy_thread.daemon = True
+            self.strategy_threads[strategy_id] = strategy_thread
+            # tell the threads to start listening
+            strategy_thread.start()
 
         return
 
-    def start(self):
-        """Runs things that need to happen at the start of a backtest/live session.
-        
-        If socket_mode is ALL, a sync flag `datafeed_start_sync` is set so that all datafeeds
-            start publishing at the same time.
-        If socket_mode is STRATEGIES_FULL, STRATEGIES_INTERNALONLY, or NONE, any existing communications
-            are handled before the event loop is started. This may include parent-child set-ups, passing
-            cash, etc.
-        
-        
-        """
-        for strategy in self.strategies.values():
-            strategy.start()
+    def run(self, synced):
+        """Starts the session."""
 
-        if self.socket_mode == c.ALL:
-        # tell datafeeds to start publishing
-        # proxies, brokers, and strategies should all be ready to process events
+        if not synced:
+            # simply tell datafeeds to start publishing
+            # proxies, brokers, and strategies are all already running
             self.datafeed_start_sync.set()
             # wait for datafeeds to finishfor data_thread in self.datafeed_threads:
             for datafeed_thread in self.datafeed_threads:
                 datafeed_thread.join()
-        
-        elif self.socket_mode in [c.STRATEGIES_FULL, c.STRATEGIES_INTERNALONLY, c.NONE]:
-
-            # handle any communication event before start
-            # e.g. passing cash, etc
-            while True:
-                try:
-                    communication_event = self.communication_deque.popleft()
-                    try:
-                        receiver = communication_event[c.RECEIVER_ID]
-                    except KeyError:
-                        raise Exception('No receiver specified for communication event\n', communication_event)
-                    self.strategies[receiver]._handle_event(communication_event)
-                except IndexError:
-                    # nothing else to handle
-                    break
-                except:
-                    raise
-            
-            self.process_events(self.socket_mode)
         else:
-            raise NotImplementedError(f'socket_mode {self.socket_mode} not implemented')
+            while not self.main_shutdown_flag.is_set():
+                had_activity = self.next()
+                if not had_activity:
+                    break
+        
+        self.main_shutdown_flag.set()
+        return
 
     def shutdown(self, linger = 0.1):
         """Exits gracefully."""
@@ -471,188 +435,95 @@ class Session:
         time.sleep(linger)
         self.zmq_context.destroy()
     
-    def process_events(self, socket_mode):
-        """Performs the main event loop in a synced manner.
-
-        A method for socket_mode in ['STRATEGIES_FULL', 'STRATEGIES_INTERNALONLY', 'NONE'].
+    def next(self):
+        """Iterates one cycle of the main event loop
 
         The event loop is as follows:
+            - clear communications queues
+            - clear order queues
+            - 
             - broker handle orders from strategies; send any response
             - get data
             - send data
             - broker handle data; send any response
         """
-        # check socket type
-        if socket_mode == c.ALL:
-            raise NotImplementedError('socket_mode = "ALL" is not implemented in process_events.')
-        elif socket_mode not in [c.STRATEGIES_FULL, c.STRATEGIES_INTERNALONLY, c.NONE]:
-            raise NotImplementedError(f'socket_mode {socket_mode} not implemented')
 
-        while not self.main_shutdown_flag.is_set():
-            # STEP 1: BROKER HANDLE ORDERS
-            # -----------------------------------------------------------------------------------------------------
-            # try to get (all) orders from strategies
-            # get from order socket if we're using sockets
-            if socket_mode == c.STRATEGIES_FULL:
-                while True:
-                    try:
-                        strategy_id_encoded, order_packed = self.broker_strategy_socket.recv_multipart(zmq.NOBLOCK)
-                        order_unpacked = utils.unpackb(order_packed)
-                        
-                        # find a broker
-                        if (broker := order_unpacked.get(c.BROKER)) is None:
-                            broker = next(iter(self.brokers.values()))
-                        # have broker handle the order
-                        if (response := broker.take_order(order_unpacked)) is not None:
-                            # prepare the response
-                            response_packed = utils.packb(response)
-                            original_sender = response[c.STRATEGY_CHAIN][-1]
-                            original_sender_encoded = original_sender.encode('utf-8')
-                            # send the response
-                            msg = self.broker_strategy_socket.send_multipart([original_sender_encoded, response_packed], copy = False, track = True)
-                            msg.wait()
-                    
-                    except zmq.ZMQError as exc:
-                        if exc.errno == zmq.EAGAIN:
-                            # nothing to get
-                            break
-                        else:
-                            raise
-            
-            # otherwise orders will be in the order deque
-            # handle in FIFO manner
-            else:
-                while True:
-                    try:
-                        order = self.order_deque.popleft()
+        # flag to keep track of activities
+        had_data = False
+        # Assume starting with all clear queues: no unhandled data, orders, or communications
+        # First get the next data event
+        if (data := self.synced_datafeed.fetch()) is not None:
+            had_data = True
+            topic = data[c.TOPIC]
+            self.proxies[c.DATA].sockets_publisher['synced_feed'].deq_in.append([topic, data]) # proxy will take unpacked data
+            # Pass down the data
+            self.proxies[c.DATA].clear_queues()
+            # At this point, brokers will have tried to fill orders with the data/cached the data,
+            #   and strategies will have processed the data event and placed any orders
+            # Allow strategies to pass on any communications/orders
+            self.proxies[c.COMMUNICATION].clear_queues()
+            # pass any orders to the broker
+            self.proxies[c.BROKER].clear_queues()
+            # If there are any responses, the parents will want to tell their children
+            self.proxies[c.COMMUNICATION].clear_queues()
 
-                        # find a broker
-                        if (broker := order.get(c.BROKER)) is None:
-                            broker = next(iter(self.brokers.values()))
-                        # have broker handle the order
-                        if (response := broker.take_order(order)) is not None:
-                            # have the strategy handle the response
-                            original_sender = response[c.STRATEGY_CHAIN][-1]
-                            self.strategies[original_sender]._handle_event(response)
-                    
-                    except IndexError:
-                        # nothing to get
-                        break
-                    
-                    except:
-                        raise
-            
-            # STEP 2: GET DATA
-            # -----------------------------------------------------------------------------------------------------
-            # Get next data event
-            if (next_data := self.synced_datafeed.fetch(1)) is None:
-                # if no more data, we're done.
-                self.main_shutdown_flag.set()
-                
-            # STEP 3: BROKERS HANDLE DATA
-            # -----------------------------------------------------------------------------------------------------
-            # Brokers will use new data to fill any outstanding orders / update states
-            else:
-                for broker in self.brokers.values():
-                    fills = broker.try_fill_with_data(next_data)
-                    for fill in fills:
-                        # if STRATEGIES_FULL, send order response via the socket
-                        if socket_mode == c.STRATEGIES_FULL:
-                            # prepare the response
-                            response_packed = utils.packb(fill)
-                            original_sender = fill[c.STRATEGY_CHAIN][-1]
-                            original_sender_encoded = original_sender.encode('utf-8')
-                            msg = self.broker_strategy_socket.send_multipart([original_sender_encoded, response_packed], copy = False, track = True)
-                            msg.wait()
-                        # otherwise directly have the strategy handle the event
-                        else:
-                            self.strategies[fill[c.STRATEGY_CHAIN][-1]]._handle_event(fill)
+        return had_data
 
-            # STEP 4: STRATEGIES HANDLE DATA
-            # -----------------------------------------------------------------------------------------------------
-                # if STRATEGIES_FULL, send data via socket
-                if socket_mode == c.STRATEGIES_FULL:
-                    # prepare the data
-                    topic_encoded = next_data[c.TOPIC].encode('utf-8')
-                    data_packed = utils.packb(next_data)
-                    msg = self.data_subscriber_socket.send_multipart([topic_encoded, data_packed], copy = False, track = True)
-                    msg.wait()
-                # otherwise have strategies directly handle the data event
-                else:
-                    for strategy_id, strategy in self.strategies.items():
-                        if next_data[c.TOPIC] in strategy.data_subscriptions:
-                            strategy._handle_event(next_data)
-            # STEP 5: RESOLVE COMMUNICATION
-            # -----------------------------------------------------------------------------------------------------
-            # Send communication to each strategy. Any further communication will be added to self.communication_deque,
-            #   and we will handle this in an infinite loop until there is no more communication (responses)
-            # t0 = time.time()
-            while True:
-                try:
-                    communication_event = self.communication_deque.popleft()
-                    try:
-                        receiver = communication_event[c.RECEIVER_ID]
-                    except KeyError:
-                        raise Exception('No receiver specified for communication event\n', communication_event)
-                    self.strategies[receiver]._handle_event(communication_event)
-                except IndexError:
-                    # nothing else to handle
-                    break
-                except:
-                    raise
-
-        # Done processing all data events; close things
-        self.shutdown()
-        
-
-
-def pub_sub_proxy(address_in, address_out, capture = None, context = None, shutdown_flag = None):
-    """Relays messages from backend (address_in) to frontend (address_out).
+class zmq_datafeed_proxy:
+    """Relays messages from backend (datafeed producers) to frontend (strategies).
         
         This is to cosolidate datafeeds so that strategies can have one central place to
         subscribe data from, and it is easier for the session to keep track of addresses.
 
-        Note that we are binding on the subscriber end because we have a
-        multiple publisher (datafeeds) - one subscriber (session) pattern
+        Note that in pyzmq's documentation, publishers are "frontend" and subscribers are
+        "backend", so the syntax maybe a little confusing here if the user is looking
+        at ZMQ docs.
     """
 
-    context = context or zmq.Context.instance()
+    def __init__(self, address_backend, address_frontend, address_capture = None, context = None, shutdown_flag = None):
 
-    # publisher facing socket
-    backend = context.socket(zmq.SUB)
-    # no filtering here
-    backend.setsockopt(zmq.SUBSCRIBE, b'')
-    backend.bind(address_in)
+        self.address_backend = address_backend
+        self.address_frontend = address_frontend
+        self.address_capture = address_capture
+        self.context = context or zmq.Context.instance()
+        self.shutdown_flag = shutdown_flag or threading.Event()
 
-    # client facing socket
-    frontend = context.socket(zmq.PUB)
-    frontend.bind(address_out)
-    
-    if capture:
-        # bind to capture address
-        capture_socket = context.socket(zmq.PUB)
-        capture_socket.bind(capture)
-    else:
-        capture_socket = None
+        # publisher facing socket
+        self.backend = context.socket(zmq.SUB)
+        # no filtering here
+        self.backend.setsockopt(zmq.SUBSCRIBE, b'')
+        self.backend.bind(address_backend)
 
-    # start the proxy
-    try:
-        zmq.proxy(frontend, backend, capture_socket)
-    except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
-        backend.close(linger = 10)
-        frontend.close(linger = 10)
-    except:
-        frontend.close(linger = 10)
-        backend.close(linger = 10)
-        raise
-    
-    # exit gracefully
-    if shutdown_flag:
-        backend.close(linger = 10)
-        frontend.close(linger = 10)
+        # client facing socket
+        self.frontend = context.socket(zmq.PUB)
+        self.frontend.bind(address_frontend)
+        
+        if address_capture:
+            # bind to capture address
+            self.capture = context.socket(zmq.PUB)
+            self.capture.bind(address_capture)
+        else:
+            self.capture = None
+
+    def run(self):
+        # start the proxy
+        try:
+            zmq.proxy(self.backend, self.frontend, self.capture)
+        except (zmq.ContextTerminated):#, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
+            self.backend.close(linger = 10)
+            self.frontend.close(linger = 10)
+        except:
+            self.frontend.close(linger = 10)
+            self.backend.close(linger = 10)
+            raise
+        
+        # # exit gracefully
+        # if self.shutdown_flag.is_set():
+        #     self.backend.close(linger = 10)
+        #     self.frontend.close(linger = 10)
 
 
-def broker_proxy(address_frontend, address_backend, capture = None, context = None, shutdown_flag = None, default_broker = None):
+class zmq_broker_proxy:
     """Relays orders to the correct brokers/strategies.
 
         This is a broker of brokers that manages sender and receiver identities.
@@ -677,65 +548,77 @@ def broker_proxy(address_frontend, address_backend, capture = None, context = No
         strategy (dealer): receives order
     
     """
-    context = context or zmq.Context.instance()
+    def __init__(self, address_backend, address_frontend, address_capture = None, context = None, shutdown_flag = None, default_broker = None):
+        
+        self.address_backend = address_backend
+        self.address_frontend = address_frontend
+        # self.address_capture = address_capture
+        self.context = context or zmq.Context.instance()
+        self.shutdown_flag = shutdown_flag or threading.Event()
+        self.default_broker = default_broker
+        
+        self.context = context or zmq.Context.instance()
 
-    # establish strategy facing socket
-    frontend = context.socket(zmq.ROUTER)
-    frontend.bind(address_frontend)
-    # establish broker facing socket
-    backend = context.socket(zmq.ROUTER)
-    backend.bind(address_backend)
-    # if there is a capture socket
-    if capture:
-        # bind to capture address
-        capture_socket = context.socket(zmq.PUB)
-        capture_socket.bind(capture)
-    else:
-        capture_socket = None
+        # establish strategy facing socket
+        self.frontend = context.socket(zmq.ROUTER)
+        self.frontend.bind(address_frontend)
+        # establish broker facing socket
+        self.backend = context.socket(zmq.ROUTER)
+        self.backend.bind(address_backend)
+        # TODO: implement capture socket
+        # if there is a capture socket
+        # if address_capture:
+        #     # bind to capture address
+        #     self.capture = context.socket(zmq.PUB)
+        #     self.capture.bind(address_capture)
+        # else:
+        #     capture_socket = None
 
-    poller = zmq.Poller()
-    poller.register(frontend, zmq.POLLIN)
-    poller.register(backend, zmq.POLLIN)
+        poller = zmq.Poller()
+        poller.register(self.frontend, zmq.POLLIN)
+        poller.register(self.backend, zmq.POLLIN)
 
-    while not shutdown_flag.is_set():
+    def run(self):
+        while not self.shutdown_flag.is_set():
 
-        try:
-            socks = dict(poller.poll(timeout = 10))
-            
-            if socks.get(frontend) == zmq.POLLIN:
-                # received order from strategy: (strategy ident, order)
-                # Note that the strategy should already have placed its strategy_id in the STRATEGY_CHAIN in the order
-                strategy_id_encoded, order_packed = frontend.recv_multipart()
-                order_unpacked = utils.unpackb(order_packed)
-                if (broker := order_unpacked.get(c.BROKER)) is not None:
-                    broker = broker
-                else:
-                    broker = default_broker
-
-                if broker is None:
-                    raise Exception('Either specify broker in order or specify default broker in session.')
+            try:
+                socks = dict(self.poller.poll(timeout = 10))
                 
-                # send the order to the broker: (broker name, )
-                backend.send_multipart([broker.encode('utf-8'), order_packed])
+                if socks.get(self.frontend) == zmq.POLLIN:
+                    # received order from strategy: (strategy ident, order)
+                    # Note that the strategy should already have placed its strategy_id in the STRATEGY_CHAIN in the order
+                    strategy_id_encoded, order_packed = self.frontend.recv_multipart()
+                    order_unpacked = utils.unpackb(order_packed)
+                    if (broker := order_unpacked.get(c.BROKER)) is not None:
+                        broker = broker
+                    else:
+                        broker = self.default_broker
 
-            elif socks.get(backend) == zmq.POLLIN:
-                # received order from broker: (broker ident, (strategy ident, order))
-                broker_encoded, order_packed = backend.recv_multipart()
-                order_unpacked = utils.unpackb(order_packed)
-                send_to = order_unpacked[c.STRATEGY_CHAIN][-1]
-                frontend.send_multipart([send_to.encode('utf-8'), utils.packb(order_unpacked)])
-        except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
-            frontend.close(linger = 10)
-            backend.close(linger = 10)
-        except:
-            raise
+                    if broker is None:
+                        raise Exception('Either specify broker in order or specify default broker in session.')
+                    
+                    # send the order to the broker: (broker name, )
+                    self.backend.send_multipart([broker.encode('utf-8'), order_packed])
 
-    # exit gracefully
-    if shutdown_flag.is_set():
-        frontend.close(linger = 10)
-        backend.close(linger = 10)
+                elif socks.get(self.backend) == zmq.POLLIN:
+                    # received order from broker: (broker ident, (strategy ident, order))
+                    broker_encoded, order_packed = self.backend.recv_multipart()
+                    order_unpacked = utils.unpackb(order_packed)
+                    send_to = order_unpacked[c.STRATEGY_CHAIN][-1]
+                    self.frontend.send_multipart([send_to.encode('utf-8'), utils.packb(order_unpacked)])
+            except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
+                self.frontend.close(linger = 10)
+                self.backend.close(linger = 10)
+            except:
+                raise
 
-def communication_proxy(address, capture = None, context = None, shutdown_flag = None):
+        # exit gracefully
+        self.frontend.close(linger = 10)
+        self.backend.close(linger = 10)
+    
+        return
+
+class zmq_communication_proxy:
     """Proxy to facilitate inter-strategy communication.
         
         Instead of each parent having their own address that children can connect to,
@@ -757,57 +640,193 @@ def communication_proxy(address, capture = None, context = None, shutdown_flag =
         }
 
     """
-    context = context or zmq.Context.instance()
+    def __init__(self, address, address_capture = None, context = None, shutdown_flag = None):
+        
+        self.address = address
+        # self.address_capture = address_capture
+        self.context = context or zmq.Context.instance()
+        self.shutdown_flag = shutdown_flag or threading.Event()
 
-    message_router = context.socket(zmq.ROUTER)
-    message_router.bind(address)
+        self.message_router = self.context.socket(zmq.ROUTER)
+        self.message_router.bind(address)
 
-    # # if there is a capture socket
-    # if capture:
-    #     # bind to capture address
-    #     capture_socket = context.socket(zmq.PUB)
-    #     capture_socket.bind(capture)
-    # else:
-    #     capture_socket = None
+        # TODO: implement capture socket
+        # # if there is a capture socket
+        # if capture:
+        #     # bind to capture address
+        #     capture_socket = context.socket(zmq.PUB)
+        #     capture_socket.bind(capture)
+        # else:
+        #     capture_socket = None
 
-    poller = zmq.Poller()
-    poller.register(message_router, zmq.POLLIN)
+        self.poller = zmq.Poller()
+        self.poller.register(self.message_router, zmq.POLLIN)
 
-    while not shutdown_flag.is_set():
-        try:
-            socks = dict(poller.poll())
-            if socks.get(message_router) == zmq.POLLIN:
-                # received message from strategy: (strategy ident, order)
-                strategy_id_encoded, message_packed = message_router.recv_multipart()
-                message_unpacked = utils.unpackb(message_packed)
-                # message_unpacked[c.SENDER_ID] = strategy_id_encoded.decode('utf-8')
-                # find out which strategy to send to
-                if (receiver := message_unpacked.get(c.RECEIVER_ID)) is None:
-                    raise Exception('No receiver for message specified')
-                # print('communications', receiver, message_unpacked, '\n')
-                # send the message to the receiver
-                message_router.send_multipart([receiver.encode('utf-8'), utils.packb(message_unpacked)])
+    def run(self):
+        while not self.shutdown_flag.is_set():
+            try:
+                socks = dict(self.poller.poll())
+                if socks.get(self.message_router) == zmq.POLLIN:
+                    # received message from strategy: (strategy ident, order)
+                    strategy_id_encoded, message_packed = self.message_router.recv_multipart()
+                    message_unpacked = utils.unpackb(message_packed)
+                    # message_unpacked[c.SENDER_ID] = strategy_id_encoded.decode('utf-8')
+                    # find out which strategy to send to
+                    if (receiver := message_unpacked.get(c.RECEIVER_ID)) is None:
+                        raise Exception('No receiver for message specified')
+                    # print('communications', receiver, message_unpacked, '\n')
+                    # send the message to the receiver
+                    self.message_router.send_multipart([receiver.encode('utf-8'), utils.packb(message_unpacked)])
 
-        except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
-            message_router.close(linger = 10)
-        except:
-            raise
+            except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
+                self.message_router.close(linger = 10)
+            except:
+                raise
 
-    # exit gracefully
-    if shutdown_flag.is_set():
-        message_router.close(linger = 10)
+        # exit gracefully
+        self.message_router.close(linger = 10)
 
-    return
+        return
+
+class DatafeedProxyEmulator:
+    """Relays data events to each strategy's sockets, filtering topics."""
+    def __init__(self, shutdown_flag = None):
+
+        self.shutdown_flag = shutdown_flag or threading.Event()
+        self.sockets_publisher = {}     # datafeeds send data here
+        self.sockets_subscriber = {}    # strategies get data here
+        self.subscriptions = {}         # strategy subscriptions
+
+    def add_publisher(self, ident):
+        self.sockets_publisher[ident] = SocketEmulator(unpack = True)
+        return self.sockets_publisher[ident]
+    
+    def add_subscriber(self, ident, subscriptions):
+        self.sockets_subscriber[ident] = SocketEmulator()
+        self.subscriptions[ident] = subscriptions
+        return self.sockets_subscriber[ident]
+    
+    def clear_queues(self):
+        """Relays the next item from each datafeed."""
+        for datafeed in self.sockets_publisher.values():
+            topic, data_unpacked = datafeed.deq_in.popleft()
+            topic_encoded, data_packed = topic.encode(), utils.packb(data_unpacked)
+            if (topic := data_unpacked.get(c.TOPIC)) is not None:
+                # send this data event to each strategies that subscribes to this topic
+                for strategy, subscriptions in self.subscriptions.items():
+                    if topic in subscriptions:
+                        self.sockets_subscriber[strategy].deq_out.append([topic_encoded, data_packed])
+    
+    def run(self):
+        while not self.shutdown_flag.is_set():
+            self.clear_queues()
+
+class BrokerProxyEmulator:
+    """Relays orders from one socket emulator to another.
+    
+    If the order's EVENT_SUBTYPE is REQUESTED, use the BROKER field to identify
+        the socket to send to.
+    Otherwise use the last item in the STRATEGY_CHAIN to identify the socket
+        to send to.
+    """
+    def __init__(self, shutdown_flag = None, default_broker = None):
+
+        self.shutdown_flag = shutdown_flag or threading.Event()
+        self.sockets = {}
+        self.default_broker = default_broker
+
+    def add_party(self, ident):
+        self.sockets[ident] = SocketEmulator(unpack = True)
+        return self.sockets[ident]
+    
+    def clear_queues(self, max_iter = 2):
+        """Clears the order queues.
+        
+        Runs until the earlier of:
+            - one full cycle where all sockets have no messages
+            - `max_iter` cycles
+        """
+        has_activities = True
+        i = 0
+        while has_activities and (i < max_iter):
+            # assume there are no events
+            has_activities = False
+            i += 1
+            for socket in self.sockets:
+                if socket.deq_in:
+                    # there was an event. Reset the flag.
+                    has_activities = True
+                    order_unpacked = socket.deq_in.popleft()
+                    # REQUESTED ==> from strategy
+                    if (order_type := order_unpacked[c.EVENT_SUBTYPE]) == c.REQUESTED:
+                        if (broker := order_unpacked.get(c.BROKER)) is None:
+                            broker = self.default_broker
+                        if broker is None:
+                            raise Exception('Either specify broker in order or specify default broker in session.')
+                        self.sockets[broker].deque_out.append(utils.packb(order_unpacked))
+                    else:
+                        strategy = order_unpacked[c.STRATEGY_CHAIN][-1]
+                        self.sockets[strategy].deque_out.append(utils.packb(order_unpacked))
+    
+    def run(self):
+        while not self.shutdown_flag.is_set():
+            self.clear_queues()
+
+
+class CommunicationProxyEmulator:
+    """Relays messages from one socket emulator to another using RECEIVER_ID."""
+    def __init__(self, shutdown_flag = None):
+
+        self.shutdown_flag = shutdown_flag or threading.Event()
+        self.sockets = {}
+
+    def add_party(self, ident):
+        self.sockets[ident] = SocketEmulator(unpack = True)
+        return self.sockets[ident]
+
+    def clear_queues(self, max_iter = 2):
+        """Clears the order queues.
+        
+        Runs until the earlier of:
+            - one full cycle where all sockets have no messages
+            - `max_iter` cycles
+        """
+        has_activities = True
+        i = 0
+        while has_activities and (i < max_iter):
+            # assume there are no events
+            has_activities = False
+            i += 1
+            for socket in self.sockets:
+                if socket.deq_in:
+                    has_activities = True
+                    message_unpacked = socket.deq_in.popleft()
+                    if (receiver := message_unpacked.get(c.RECEIVER_ID)) is None:
+                        raise Exception('No receiver for message specified')
+                    if receiver not in self.sockets.keys():
+                        raise Exception(f'Receiver {receiver} not found.')
+                    # attach a packed message for receiving at the receiver's socket
+                    self.sockets[receiver].deq_out.append(utils.packb(message_unpacked))
+    
+    def run(self):
+        while not self.shutdown_flag.is_set():
+            self.clear_queues()
+
 
 class SocketEmulator:
-    def __init__(self, deq_in = None, deq_out = None):
+    def __init__(self, deq_in = None, deq_out = None, unpack = False):
         """A class to emulate strategy sockets for communication.
-            Doesn't fully emulate dealer-router type sockets, as one cannot extract the sender identity.
-            Sender should include SENDER_ID or RECEIVER_ID in the message in those cases.
+            For two-way communications, a proxy should be implemented to have two `SocketEmulator`s
+            and pass events between the two.
 
         Args:
-            deq (collection.deque instance, optional): The deque to append received events to. Defaults to None.
+            deq_in (collection.deque instance, optional): The deque to append events sent to the socket.
+                Defaults to None.
+            deq_in (collection.deque instance, optional): The deque to append events to be received from the socket.
+                Defaults to None.
         """
+        self.unpack = unpack
+
         if deq_in is not None:
             self.deq_in = deq_in
         else:
@@ -819,19 +838,28 @@ class SocketEmulator:
             self.deq_out = deque()
 
     def send(self, item):
-        self.deq_in.append(utils.unpackb(item))
+        """items are sent here to the socket."""
+        if self.unpack:
+            self.deq_in.append(utils.unpackb(item))
+        else:
+            self.deq_in.append(item)
 
     def send_multipart(self, items):
-        item = items[1]
-        self.deq_in.append(utils.unpackb(item))
+        """items are sent here to the socket."""
+        if self.unpack:
+            self.deq_in.append([items[0].decode(), utils.unpackb(items[1])])
+        else:
+            self.deq_in.append(items)
 
     def recv(self):
+        """items are retrieved from the socket here."""
         if self.deq_out:
             return self.deq_out.popleft()
         else:
             raise zmq.ZMQError(errno = zmq.EAGAIN, msg = 'Socket emulator: Nothing to receive.')
     
     def recv_multipart(self):
+        """items are retrieved from the socket here."""
         if self.deq_out:
             return self.deq_out.popleft()
         else:

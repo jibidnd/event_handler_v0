@@ -56,6 +56,12 @@ class Strategy(event_handler.EventHandler):
         data_subscriptions
         shares
 
+    Methods:
+        start
+        prenext
+        process_data
+        process_communication
+        process_order
     """
     def __init__(self, name = None, zmq_context = None, communication_address = None,
                     data_address = None, order_address = None, logging_addresses = None,
