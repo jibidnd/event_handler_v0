@@ -22,7 +22,7 @@ TODO:
 
 """
 import copy
-from collections import deque
+from collections import deque, defaultdict
 
 import pandas as pd
 import zmq
@@ -32,7 +32,13 @@ from .. import utils
 from ..utils import constants as c
 
 class SimpleBroker(BaseBroker):
-    """A simple broker to simulate taking and filling market and limit orders."""
+    """A simple broker to simulate taking and filling market and limit orders.
+    
+    The most recent data event will be cached, and any incoming order will be matched against
+    the cached data event if the timestamp is appropriate. This is to handle
+    left- and center- aligned bars, since those bars may arrive at the broker before the order
+    does, despite being a later event than the order (data is broadcasted first; see session.next for details).
+    """
     
     def __init__(self, name, fill_method, zmq_context = None):
         """Inits a simple broker.
@@ -43,9 +49,9 @@ class SimpleBroker(BaseBroker):
         """  
         super().__init__(name, zmq_context)
         self.fill_method = fill_method
-        self.open_orders = {}               # better to refer to orders by id so we can refer to the same order even if attributes change
+        self.open_orders = {}                   # better to refer to orders by id so we can refer to the same order even if attributes change
         self.closed_orders = []
-        self.data_cache = deque()           # to handle left- or center- aligned bars
+        self.data_cache = defaultdict(lambda: deque(maxlen = 1))    # to handle left- or center- aligned bars
     
     # ----------------------------------------------------------------------------------------
     # Event handling
@@ -57,9 +63,9 @@ class SimpleBroker(BaseBroker):
         
         Args:
             data (dict): Data event.
-        """        
+        """
         # first update clock
-        self.clock = data[c.EVENT_TS]
+        # self.clock = data[c.EVENT_TS]
         # try to fill any existing open orders
         fills = self.try_fill_with_data(data)
         # emit the order if there are any fills
@@ -71,7 +77,7 @@ class SimpleBroker(BaseBroker):
         self.process_data(data)
         return
 
-    def place_order(self, order):
+    def _place_order(self, order):
         """Handles an incoming order and respond with a "RECEIVED" order event.
 
         Args:
@@ -113,12 +119,9 @@ class SimpleBroker(BaseBroker):
             
             else:
                 raise NotImplementedError(f'Order type {order_type} not supported')
-
-        if (response is not None) and (self.order_socket is not None):
-            # emit the response if there is any
-            response_packed = utils.packb(response)
-            self.order_socket.send(response_packed, flags = zmq.NOBLOCK)
-        return
+        
+        self.place_order(self, order)
+        return response
 
     def try_fill_with_data(self, data):
         """ Tries to fill all currently open orders against data.
@@ -139,26 +142,26 @@ class SimpleBroker(BaseBroker):
         if (symbol_data := data.get(c.SYMBOL)) is None:
             return
 
-        else:
-            # try to fill each order
-            for order_id, open_order in self.open_orders.items():
-                if (symbol_order := open_order[c.SYMBOL]) == symbol_data:
-                    # If there is a fill (partial or complete)
-                    if self.fill_method(open_order, data):
-                        # can forget this order if the order is fully filled
-                        if open_order[c.QUANTITY_OPEN] == 0:
-                            closed.append(order_id)
-                            open_order[c.EVENT_SUBTYPE] = c.FILLED
-                        else:
-                            open_order[c.EVENT_SUBTYPE] = c.PARTIALLY_FILLED
-                        
-                        fills.append(open_order.copy())
-            
-            # closed orders from self.open_orders to self.closed_orders
-            for order_id in closed:
-                self.closed_orders.append(self.open_orders.pop(order_id))
+        # try to fill each order
+        for order_id, open_order in self.open_orders.items():
+            if ((symbol_order := open_order[c.SYMBOL]) == symbol_data):
 
-            return fills
+                # If there is a fill (partial or complete)
+                if self.fill_method(open_order, data):
+                    # can forget this order if the order is fully filled
+                    if open_order[c.QUANTITY_OPEN] == 0:
+                        closed.append(order_id)
+                        open_order[c.EVENT_SUBTYPE] = c.FILLED
+                    else:
+                        open_order[c.EVENT_SUBTYPE] = c.PARTIALLY_FILLED
+                    
+                    fills.append(open_order.copy())
+        
+        # closed orders from self.open_orders to self.closed_orders
+        for order_id in closed:
+            self.closed_orders.append(self.open_orders.pop(order_id))
+
+        return fills
 
 
 
@@ -179,20 +182,26 @@ def immediate_fill(order, data, fill_strategy = c.CLOSE, commission = 0.0):
 
     assert order.get(c.QUANTITY_OPEN) != 0, 'Nothing to fill.'
 
-    # if it is a bar, check if the order is eligible to be filled by the bar
-    # need the bar to be completely after the order
+    # Get start of data event. Only use this data event to fill
+    # orders that were placed prior to the start, to avoid data snooping
     if data[c.EVENT_SUBTYPE] == c.BAR:
+        bar_length = pd.Timedelta(value = data[c.MULTIPLIER], unit = data[c.RESOLUTION])
         if data[c.ALIGNMENT] == c.LEFT:
-            offset = pd.Timedelta(value = 0, unit = data[c.RESOLUTION])
+            data_start = data[c.EVENT_TS]
+            data_end = data[c.EVENT_TS] + bar_length
         elif data[c.ALIGNMENT] == c.CENTER:
-            offset = -pd.Timedelta(value = data[c.MULTIPLIER], unit = data[c.RESOLUTION]) / 2
+            data_start = data[c.EVENT_TS] - bar_length / 2
+            data_end = data[c.EVENT_TS] + bar_length / 2
         elif data[c.ALIGNMENT] == c.RIGHT:
-            offset = -pd.Timedelta(value = data[c.MULTIPLIER], unit = data[c.RESOLUTION])
+            data_start = data[c.EVENT_TS] - bar_length
+            data_end = data[c.EVENT_TS]
         else:
             raise NotImplementedError(f"Expected one of 'LEFT', 'RIGHT', or 'CENTER' for bar aligntment. Got '{data[c.ALIGNMENT]}' instead")
-        
-        if (bar_begin := data[c.EVENT_TS] + offset) < order[c.EVENT_TS]:
-            return False
+    else:
+        data_start = data_end = data[c.EVENT_TS]
+    
+    if data_start < order[c.EVENT_TS]:
+        return False
 
     is_buy = order[c.QUANTITY_OPEN] > 0
 
@@ -230,6 +239,7 @@ def immediate_fill(order, data, fill_strategy = c.CLOSE, commission = 0.0):
     else:
         raise NotImplementedError
     
+    # Update the order if there is a fill
     if p is not None:
         # note that dictionaries are mutable
         # fully fill the order
@@ -240,7 +250,7 @@ def immediate_fill(order, data, fill_strategy = c.CLOSE, commission = 0.0):
         order[c.CREDIT] += (-q) * p if (not is_buy) else 0
         order[c.DEBIT] += q * p if (is_buy) else 0
         order[c.AVERAGE_FILL_PRICE] = abs(order[c.CREDIT] - order[c.DEBIT]) / order[c.QUANTITY_FILLED]
-        order[c.EVENT_TS] = data[c.EVENT_TS]
+        order[c.EVENT_TS] = data_end
         return True
     else:
         return False

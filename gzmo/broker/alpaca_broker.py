@@ -127,12 +127,9 @@ class AlpacaBroker(BaseBroker):
             }
         else:
             response = response.json()
-
-        if response is not None:
-            self._handle_event(response)
         
         self.place_order(self, order)
-        return
+        return response
     
     def place_order(self, order):
         pass

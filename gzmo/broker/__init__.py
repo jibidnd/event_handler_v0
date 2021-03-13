@@ -175,7 +175,8 @@ class BaseBroker(event_handler.EventHandler):
 
         # if this is an order request from a strategy
         if order_internal[c.EVENT_SUBTYPE] == c.REQUESTED:
-            self.place_order(order_external)
+            if (response := self._place_order(order_external)) is not None:
+                self._handle_event(response)
         # otherwise it's a response from the broker. Send it to the strategy
         else:
             if (self.order_socket is not None):
