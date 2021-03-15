@@ -97,7 +97,7 @@ class Strategy(event_handler.EventHandler):
 
         # Keeping track of time: internally, time will be tracked as local time
         # For communication, (float) timestamps on the second resolution @ UTC will be used.
-        self.clock = utils.unix2datetime(0.0)
+        self.clock = pd.Timestamp(0)
         self.shutdown_flag = threading.Event()
 
 
@@ -358,7 +358,7 @@ class Strategy(event_handler.EventHandler):
             c.STRATEGY_ID: self.strategy_id,
             c.EVENT_TYPE: c.ORDER,
             c.EVENT_SUBTYPE: c.CASHFLOW,
-            c.EVENT_TS: self.clock.timestamp(),
+            c.EVENT_TS: self.clock,
             c.SYMBOL: self.strategy_id,
             c.ASSET_CLASS: c.STRATEGY,
             c.CREDIT: amount if amount > 0 else 0,
@@ -455,7 +455,7 @@ class Strategy(event_handler.EventHandler):
                 # take the first item (socket name) of the first item ((socket name, event)) of the sorted queue
                 next_socket = sorted(next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
                 next_event = next_events.pop(next_socket)        # remove the event from next_events
-                self._process_event(next_event)
+                self._handle_event(next_event)
 
     def _before_stop(self):
         pass
@@ -499,7 +499,7 @@ class Strategy(event_handler.EventHandler):
 
         # localize the event ts
         # event_ts should already be a pd.Timestamp object from unpacking
-        event[c.EVENT_TS] = event[c.EVENT_TS].astimezone(self.local_tz)
+        # event[c.EVENT_TS] = event[c.EVENT_TS].astimezone(self.local_tz)
         # event_ts = event[c.EVENT_TS]
         # if isinstance(event_ts, (int, float, decimal.Decimal)):
         #     event_ts = utils.unix2datetime(event_ts, to_tz = self.local_tz)
@@ -513,8 +513,8 @@ class Strategy(event_handler.EventHandler):
         "Overrides the parent handle_event method to update clock."
 
         # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
-        if (event_ts := event[c.EVENT_TS]) > self.clock.timestamp():
-            self.clock = utils.unix2datetime(event_ts)
+        if (event_ts := event[c.EVENT_TS]) > self.clock:
+            self.clock = event_ts
         return super()._process_event(event)
 
     def _process_data(self, data):
@@ -971,7 +971,11 @@ class Strategy(event_handler.EventHandler):
             strategy.position: The newly created position.
         """
         owner = owner or self.strategy_id
-        asset_class = asset_class or c.EQUITY
+        if symbol in self.children.values():
+            default_asset_class = c.STRATEGY
+        else:
+            default_asset_class = c.EQUITY
+        asset_class = asset_class or default_asset_class
 
         position = Position(symbol = symbol, owner = owner, asset_class = asset_class, trade_id = trade_id, position_id = position_id)
         self.open_positions[position.position_id] = position
@@ -1029,7 +1033,7 @@ class Strategy(event_handler.EventHandler):
             c.TRADE_ID: position.trade_id,
             c.POSITION_ID: position.position_id,
             c.ORDER_ID: order.get(c.ORDER_ID) or str(uuid.uuid1()),
-            c.EVENT_TS: self.clock.isoformat()
+            c.EVENT_TS: self.clock
         }
 
         order = {**order, **info}

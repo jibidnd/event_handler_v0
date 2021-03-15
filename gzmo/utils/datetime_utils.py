@@ -92,6 +92,40 @@ def unix2num(unix_timestamp, tz = pytz.timezone('UTC'), resolution = 'millisecon
 
     return base
 
+def is_isoformat(str):
+    ISO8601YMD = re.compile(r'\d{4}-\d{2}-\d{2}T')
+    return bool(ISO8601YMD.match(str))
+
+
+def to_isoformat(dict_data, endswiths = None):
+    dict_data = {**dict_data}
+    endswiths = endswiths or ['_at', '_timestamp', '_time', 'EVENT_TS']
+    for key in dict_data.keys():
+        for endswith in endswiths:
+            if key.endswith(endswith):
+                try:
+                    dict_data[key] = pd.Timestamp(dict_data[key]).isoformat()
+                except:
+                    pass
+    
+    return dict_data
+
+def to_timestamp(dict_data, endswiths = None):
+    dict_data = {**dict_data}
+    endswiths = endswiths or ['_AT', '_TIMESTAMP', '_TIME', 'EVENT_TS']
+    for key in dict_data.keys():
+        for endswith in endswiths:
+            if key.upper().endswith(endswith):
+                try:
+                    dict_data[key] = pd.Timestamp(dict_data[key])
+                except:
+                    pass
+    
+    return dict_data
+
+
+
+NY = 'America/New_York'
 
 def duration_to_sec(duration):
     """Converts a duration to number of seconds.

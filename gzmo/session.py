@@ -6,7 +6,6 @@ from gzmo.datafeeds import DataFeedQuery
 import threading
 import time
 import zmq
-from zmq.sugar.socket import Socket
 
 from . import utils
 from .utils import constants as c
@@ -138,11 +137,11 @@ class Session:
         # main shutdown flag
         self._main_shutdown_flag = threading.Event()
 
-    def add_strategy(self, strategy):
+    def add_strategy(self, name, strategy):
         """Adds a strategy to the session.
             Note that any child strategies should be added to the session as well.
         """
-        self.strategies[strategy.get(c.STRATEGY_ID)] = strategy
+        self.strategies[name] = strategy
     
     def add_datafeed(self, name, datafeed):
         """Adds data feeds to the session."""
@@ -305,7 +304,7 @@ class Session:
             # Start the datafeed if not syncing
             # Publishing will be blocked until _datafeed_start_sync is set.
             if not synced:
-                datafeed_thread = threading.Thread(target = datafeed.publish)
+                datafeed_thread = threading.Thread(target = datafeed._start)
                 datafeed_thread.daemon = True
                 self._datafeed_threads[name] = datafeed_thread
                 datafeed_thread.start()        
@@ -368,7 +367,7 @@ class Session:
             were sent to ZMQ sockets.
         
         """
-        for strategy_id, strategy in self.strategies.items():
+        for name, strategy in self.strategies.items():
             strategy.zmq_context = self._zmq_context
             strategy.shutdown_flag = self._main_shutdown_flag
 
@@ -387,7 +386,7 @@ class Session:
             # start running the strategies so they are ready to receive data
             strategy_thread = threading.Thread(target = strategy.run)
             strategy_thread.daemon = True
-            self._strategy_threads[strategy_id] = strategy_thread
+            self._strategy_threads[name] = strategy_thread
             # tell the threads to start listening
             strategy_thread.start()
 
@@ -435,7 +434,7 @@ class Session:
         if (data := self._synced_datafeed.fetch()) is not None:
             had_data = True
             topic = data[c.TOPIC]
-            self._proxies[c.DATA].sockets_publisher['synced_feed'].deq_in.append([topic, data]) # proxy will take unpacked data
+            self._proxies[c.DATA].sockets_publisher['synced_feed'].send_multipart([topic.encode(), utils.packb(data)])
             # Pass down the data
             self._proxies[c.DATA].clear_queues()
             # At this point, brokers will have tried to fill orders with the data/cached the data,
@@ -695,7 +694,6 @@ class zmq_communication_proxy:
                     # find out which strategy to send to
                     if (receiver := message_unpacked.get(c.RECEIVER_ID)) is None:
                         raise Exception('No receiver for message specified')
-                    # print('communications', receiver, message_unpacked, '\n')
                     # send the message to the receiver
                     self.message_router.send_multipart([receiver.encode('utf-8'), utils.packb(message_unpacked)])
 
@@ -722,7 +720,7 @@ class DatafeedProxyEmulator:
         self.subscriptions = {}         # strategy subscriptions
 
     def add_publisher(self, ident):
-        self.sockets_publisher[ident] = SocketEmulator(unpack = True)
+        self.sockets_publisher[ident] = SocketEmulator()
         return self.sockets_publisher[ident]
     
     def add_subscriber(self, ident, subscriptions):
@@ -733,14 +731,26 @@ class DatafeedProxyEmulator:
     def clear_queues(self):
         """Relays the next item from each datafeed."""
         for datafeed in self.sockets_publisher.values():
-            if datafeed.deq_in:
-                topic, data_unpacked = datafeed.deq_in.popleft()
-                topic_encoded, data_packed = topic.encode(), utils.packb(data_unpacked)
-                if (topic := data_unpacked.get(c.TOPIC)) is not None:
-                    # send this data event to each strategies that subscribes to this topic
-                    for strategy, subscriptions in self.subscriptions.items():
-                        if topic in subscriptions:
-                            self.sockets_subscriber[strategy].deq_out.append([topic_encoded, data_packed])
+            try:
+                topic_encoded, data_packed = datafeed.recv_multipart(flags = zmq.NOBLOCK)
+                topic_decoded, data_unpacked = topic_encoded.decode(), utils.unpackb(data_unpacked)
+                # send this data event to each strategies that subscribes to this topic
+                for strategy, subscriptions in self.subscriptions.items():
+                    if topic_decoded in subscriptions:
+                        self.sockets_subscriber[strategy].send_multipart([topic_encoded, data_packed])
+            except zmq.ZMQError:
+                pass
+            except:
+                raise
+
+            # if datafeed.deq_in:
+            #     topic, data_unpacked = datafeed.deq_in.popleft()
+            #     topic_encoded, data_packed = topic.encode(), utils.packb(data_unpacked)
+            #     if topic is not None:
+            #         # send this data event to each strategies that subscribes to this topic
+            #         for strategy, subscriptions in self.subscriptions.items():
+            #             if topic in subscriptions:
+            #                 self.sockets_subscriber[strategy].deq_out.append([topic_encoded, data_packed])
     
     def run(self):
         self._start()
@@ -768,7 +778,7 @@ class BrokerProxyEmulator:
         self.default_broker = default_broker
 
     def add_party(self, ident):
-        self.sockets[ident] = SocketEmulator(unpack = True)
+        self.sockets[ident] = SocketEmulator()
         return self.sockets[ident]
     
     def clear_queues(self, max_iter = 2):
@@ -785,20 +795,26 @@ class BrokerProxyEmulator:
             has_activities = False
             i += 1
             for socket in self.sockets.values():
-                if socket.deq_in:
-                    # there was an event. Reset the flag.
-                    has_activities = True
-                    order_unpacked = socket.deq_in.popleft()
+                try:
+                    order_packed = socket.recv()
+                    order_unpacked = utils.unpackb(order_packed)
                     # REQUESTED ==> from strategy
                     if (order_type := order_unpacked[c.EVENT_SUBTYPE]) == c.REQUESTED:
                         if (broker := order_unpacked.get(c.BROKER)) is None:
                             broker = self.default_broker
                         if broker is None:
                             raise Exception('Either specify broker in order or specify default broker in session.')
-                        self.sockets[broker].deque_out.append(utils.packb(order_unpacked))
+                        self.sockets[broker].deq.append(utils.packb(order_unpacked))
                     else:
                         strategy = order_unpacked[c.STRATEGY_CHAIN][-1]
-                        self.sockets[strategy].deque_out.append(utils.packb(order_unpacked))
+                        self.sockets[strategy].send(order_packed)
+                    # there was an event. Reset the flag.
+                    has_activities = True
+                except zmq.ZMQError:
+                    pass
+                except:
+                    raise
+
     
     def run(self):
         self._start()
@@ -820,7 +836,7 @@ class CommunicationProxyEmulator:
         self.sockets = {}
 
     def add_party(self, ident):
-        self.sockets[ident] = SocketEmulator(unpack = True)
+        self.sockets[ident] = SocketEmulator()
         return self.sockets[ident]
 
     def clear_queues(self, max_iter = 2):
@@ -837,15 +853,20 @@ class CommunicationProxyEmulator:
             has_activities = False
             i += 1
             for socket in self.sockets.values():
-                if socket.deq_in:
-                    has_activities = True
-                    message_unpacked = socket.deq_in.popleft()
+                try:
+                    message_packed = socket.recv()
+                    message_unpacked = utils.unpackb(message_packed)
                     if (receiver := message_unpacked.get(c.RECEIVER_ID)) is None:
                         raise Exception('No receiver for message specified')
                     if receiver not in self.sockets.keys():
                         raise Exception(f'Receiver {receiver} not found.')
                     # attach a packed message for receiving at the receiver's socket
-                    self.sockets[receiver].deq_out.append(utils.packb(message_unpacked))
+                    self.sockets[receiver].send(message_packed)
+                    has_activities = True
+                except zmq.ZMQError:
+                    pass
+                except:
+                    raise
     
     def run(self):
         self._start()
@@ -861,58 +882,47 @@ class CommunicationProxyEmulator:
 
 
 class SocketEmulator:
-    def __init__(self, deq_in = None, deq_out = None, unpack = False):
+    def __init__(self, deq = None):
         """A class to emulate strategy sockets for communication.
             For two-way communications, a proxy should be implemented to have two `SocketEmulator`s
             and pass events between the two.
 
         Args:
-            deq_in (collection.deque instance, optional): The deque to append events sent to the socket.
-                Defaults to None.
-            deq_in (collection.deque instance, optional): The deque to append events to be received from the socket.
-                Defaults to None.
+            deq (collection.deque instance, optional): The deque to keep track of events.
+                Add from the right, take from the left.
         """
-        self.unpack = unpack
+        # self.unpack = unpack
 
-        if deq_in is not None:
-            self.deq_in = deq_in
+        if deq is not None:
+            self.deq = deq
         else:
-            self.deq_in = deque()
-        
-        if deq_out is not None:
-            self.deq_out = deq_out
-        else:
-            self.deq_out = deque()
+            self.deq = deque()
 
     def send(self, item, flags = zmq.NULL):
         """items are sent here to the socket."""
-        if self.unpack:
-            self.deq_in.append(utils.unpackb(item))
-        else:
-            self.deq_in.append(item)
+        # if self.unpack:
+        #     self.deq.append(utils.unpackb(item))
+        # else:
+        #     self.deq.append(item)
+        self.deq.append(item)
 
     def send_multipart(self, items, flags = zmq.NULL):
         """items are sent here to the socket."""
-        if self.unpack:
-            self.deq_in.append([items[0].decode(), utils.unpackb(items[1])])
-        else:
-            self.deq_in.append(items)
+        self.deq.append(items)
 
     def recv(self, flags = zmq.NULL):
         """items are retrieved from the socket here."""
         if flags == zmq.NOBLOCK:
         # do not block and throw and error
-            if self.deq_out:
-                return self.deq_out.popleft()
+            if self.deq:
+                return self.deq.popleft()
             else:
                 raise zmq.ZMQError(errno = zmq.EAGAIN, msg = 'Socket emulator: Nothing to receive.')
         else:
         # block and wait for message
             while True:
-                if self.deq_out:
-                    return self.deq_out.popleft()
-        
-
+                if self.deq:
+                    return self.deq.popleft()
     
     def recv_multipart(self, flags = zmq.NULL):
         return self.recv(flags)

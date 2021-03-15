@@ -6,6 +6,7 @@ import datetime
 import warnings
 import decimal
 
+import pandas as pd
 import pytz
 import msgpack
 
@@ -84,17 +85,14 @@ def default_pre_packer(obj):
         obj: The object to be prepacked.
     """    
     if isinstance(obj, datetime.datetime):
-        if (tzinfo := obj.tzinfo) is None:
-            obj = obj.astimezone(tz = None) # assumes system local timezone
-            warnings.warn('Naive datetime object passed. Assuming system local timezone.')
-        processed = msgpack.ExtType(5, msgpack.packb((obj.isoformat(), obj.tzinfo), default = str))
+        # if (tzinfo := obj.tzinfo) is None:
+        #     obj = obj.astimezone(tz = None) # assumes system local timezone
+        #     warnings.warn('Naive datetime object passed. Assuming system local timezone.')
+        processed = msgpack.ExtType(5, msgpack.packb(obj.isoformat(), default = str))
+    elif isinstance(obj, decimal.Decimal):
+        processed = msgpack.ExtType(10, str(obj).encode('utf-8'))
     else:
-        if isinstance(obj, decimal.Decimal):
-            processed = msgpack.ExtType(10, str(obj).encode('utf-8'))
-        # elif (s := str(obj)).isnumeric():
-        #     processed = obj
-        else:
-            processed = obj
+        processed = obj
     return processed
 
 def packb(obj):
@@ -110,15 +108,7 @@ def ext_hook(ext_type_code, data):
     """
     # Handle it if it is one of the pre-defined ext_types
     if ext_type_code == 5:
-        isoformat, tzinfo = msgpack.unpackb(data)
-        try:
-            # add tzinfo if it is recognized by pytz
-            # Note that some timezone names can be ambiguous (see https://pypi.org/project/pytz/)
-            #   In such cases (e.g. PST), the tzname will be dropped.
-            tzinfo = pytz.timezone(tzinfo)
-            return tzinfo.localize(datetime.datetime.fromisoformat(isoformat).replace(tzinfo = None))
-        except:
-            return datetime.datetime.fromisoformat(isoformat)
+        return pd.Timestamp(msgpack.unpackb(data))
     elif ext_type_code == 10:
         return decimal.Decimal(data.decode('utf-8'))
     # otherwise let msgpack do the default handling of ext_types
