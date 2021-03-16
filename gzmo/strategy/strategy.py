@@ -98,7 +98,7 @@ class Strategy(event_handler.EventHandler):
         # Keeping track of time: internally, time will be tracked as local time
         # For communication, (float) timestamps on the second resolution @ UTC will be used.
         self.clock = pd.Timestamp(0)
-        self.shutdown_flag = threading.Event()
+        self._shutdown_flag = threading.Event()
 
 
         # Connection things
@@ -380,7 +380,7 @@ class Strategy(event_handler.EventHandler):
         # placeholder
         pass
 
-    def _start(self, shutdown_flag = None):
+    def _start(self, session_shutdown_flag = None, pause = 1):
         """Main event loop to handle events from sockets.
 
         The main event loop continuously checks for events from the communication, data,
@@ -407,14 +407,14 @@ class Strategy(event_handler.EventHandler):
         """
         # TODO: what if we lag behind in processing? how do we catch up?
 
-        if shutdown_flag is None:
-            shutdown_flag = self.shutdown_flag
-            shutdown_flag.clear()
+        if session_shutdown_flag is None:
+            session_shutdown_flag = self._shutdown_flag
+            session_shutdown_flag.clear()
 
         # the event 'queue'
         next_events = {}
 
-        while not shutdown_flag.is_set():
+        while (not session_shutdown_flag.is_set()) and (not self._shutdown_flag.is_set()):
 
             if (next_events.get(c.COMMUNICATION_SOCKET) is None) and (self.communication_socket is not None):
                 try:
@@ -456,6 +456,8 @@ class Strategy(event_handler.EventHandler):
                 next_socket = sorted(next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
                 next_event = next_events.pop(next_socket)        # remove the event from next_events
                 self._handle_event(next_event)
+            else:
+                time.sleep(pause)
 
     def _before_stop(self):
         pass
@@ -465,7 +467,7 @@ class Strategy(event_handler.EventHandler):
 
         Sets the shutdown floag and closes any open sockets.
         """
-        self.shutdown_flag.set()
+        self._shutdown_flag.set()
 
         time.sleep(1)
 
@@ -951,7 +953,7 @@ class Strategy(event_handler.EventHandler):
                 event[c.STRATEGY_CHAIN].append(last)
         if direction == c.UP:
             event[c.STRATEGY_CHAIN].append(self.strategy_id)
-
+        
         return event
 
     # ----------------------------------------------------------------------------------------------------
@@ -1170,7 +1172,6 @@ class Strategy(event_handler.EventHandler):
         # order = order or {}
         # symbol = symbol or order.get(c.SYMBOL)
         # quantity = quantity or order.get(c.QUANTITY)
-
 
         order = self.prepare_order(order, position = None)
         self.positions_handle_order(order)

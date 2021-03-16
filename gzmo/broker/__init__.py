@@ -6,6 +6,7 @@ import threading
 from decimal import Decimal
 import datetime
 import configparser
+import time
 
 import pandas as pd
 import zmq
@@ -34,7 +35,6 @@ class BaseBroker(event_handler.EventHandler):
         data_socket (zmq socket): If using sockets, the socket to receive (price) data from.
         order_socket (zmq socket): If using sockets, the socket to receive orders from.
         logging_socket (zmq socket): If using sockets, the socket to send logs to.
-        main_shutdown_flag (threading.Event): If threading is used, this event can be set to signal that the main session has shut down.
         shutdown_flag (threading.Event): If threading is used, this event can be set to signal the broker to shut down.
         clock (decimal.Decimal): UTC timestamp to keep track of time.
     
@@ -73,10 +73,8 @@ class BaseBroker(event_handler.EventHandler):
         self.order_socket = None
         self.logging_socket = None
         
-        # These can be overriden for threads, but are otherwise just placeholders
-        self.main_shutdown_flag = threading.Event()
-        self.shutdown_flag = threading.Event()
-        
+        self._shutdown_flag = threading.Event()
+
         # clock to keep track of time
         # self.clock = Decimal(0.00)
     
@@ -161,17 +159,22 @@ class BaseBroker(event_handler.EventHandler):
     def format_order_in(self, order):
         return order
 
-    def _start(self):
+    def _start(self, session_shutdown_flag = None, pause = 1):
         """Processes events from sockets.
 
             Sequentially process events arriving at the data and order sockets.
             All *received* data are synced and processed chronologically, as indicated
             by the EVENT_TS field of the event.
         """
+
+        if session_shutdown_flag is None:
+            session_shutdown_flag = self._shutdown_flag
+            session_shutdown_flag.clear()
+
         # the event "queue"
         next_events = {}
 
-        while (not self.main_shutdown_flag.is_set()) and (not self.shutdown_flag.is_set()):
+        while (not session_shutdown_flag.is_set()) and (not self._shutdown_flag.is_set()):
             
             # get from data socket if slot is empty
             if (next_events.get(c.DATA_SOCKET) is None) and (self.data_socket is not None):
@@ -208,8 +211,9 @@ class BaseBroker(event_handler.EventHandler):
                 # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
                 if (tempts := next_event[c.EVENT_TS]) > self.clock:
                     self.clock = tempts
-
                 self._handle_event(next_event)
+            else:
+                time.sleep(pause)
 
     def _process_order(self, order):
         """Class method to process an incoming order events.
@@ -236,7 +240,7 @@ class BaseBroker(event_handler.EventHandler):
     def _stop(self):
         """Set the shutdown flag and close the sockets.
         """        
-        self.shutdown_flag.set()
+        self._shutdown_flag.set()
         for socket in [self.data_socket, self.order_socket, self.logging_socket]:
             socket.close(linger = 10)
 

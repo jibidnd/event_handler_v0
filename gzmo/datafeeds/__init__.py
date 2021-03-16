@@ -28,7 +28,6 @@ class BaseDataFeed(abc.ABC):
             start_sync (threading.Event): can be used to sync starting times between multiple datafeeds.
                 To use it, simply assign `datafeed.start_sync` to a common threading.Event() instance,
                 start all the datafeeds, and `set` the threading.Event() instance.
-            main_shutdown_flag (threading.Event): If threading is used, this event can be set to signal that the main session has shut down.
             shutdown_flag (threading.Event): If threading is used, this event can be set to signal the datafeed to shut down.
         
         Methods:
@@ -51,8 +50,7 @@ class BaseDataFeed(abc.ABC):
         self.from_beginning = True
         self.start_sync = threading.Event(); self.start_sync.set()  # default to not block for a sync
         self.is_finished = False
-        self.main_shutdown_flag = threading.Event()
-        self.shutdown_flag = threading.Event()
+        self._shutdown_flag = threading.Event()
         self.publishing_socket = None
 
         # Get auth file if a path if provided
@@ -96,7 +94,10 @@ class BaseDataFeed(abc.ABC):
     def fetch(self, limit = 1):
         pass
     
-    def _start(self):
+    def run(self, session_shutdown_flag = None, pause = 1):
+        return self._start(session_shutdown_flag = session_shutdown_flag, pause = pause)
+
+    def _start(self, session_shutdown_flag = None, pause = 1):
         """Publishes the queried data to the socket.
 
             The queried data will be published to the socket, record by record, until
@@ -120,8 +121,8 @@ class BaseDataFeed(abc.ABC):
         self.start_sync.wait()
 
         # Keep going?
-        while (not self.main_shutdown_flag.is_set()) and \
-                (not self.shutdown_flag.is_set()) and \
+        while (not session_shutdown_flag.is_set()) and \
+                (not self._shutdown_flag.is_set()) and \
                 (not self.is_finished):
             
             # get one row of result everytime
@@ -137,28 +138,28 @@ class BaseDataFeed(abc.ABC):
                         pass
                     else:
                         # unexpected error: shutdown and raise
-                        self.shutdown()
+                        self._stop()
                         raise
                 except zmq.ContextTerminated:
                     # context is being closed by session
-                    self.shutdown()
+                    self._stop()
                 except:
                     raise
             else:
                 # no more results
                 self.is_finished = True
-                self.shutdown()
+                self._stop()
 
                 break
         
         # shut down gracefully
-        self.shutdown()
+        self._stop()
 
         return
 
     def _stop(self):
         """Shuts down gracefully."""
-        self.shutdown_flag.set()
+        self._shutdown_flag.set()
         self.publishing_socket.close(linger = 10)
 
 

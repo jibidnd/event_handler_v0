@@ -51,10 +51,10 @@ class EventHandler(abc.ABC):
     
     # -------------------------------------------------------------------
 
-    def run(self):
+    def run(self, session_shutdown_flag = None):
         self._before_start()
         self.before_start()
-        self._start()
+        self._start(session_shutdown_flag = session_shutdown_flag)
         self._before_stop()
         self.before_stop()
         self._stop()
@@ -168,7 +168,7 @@ class EventHandler(abc.ABC):
             self._process_communication(event)
         else:
             raise Exception('Event type {} not supported.'.format(event_type))
-
+        
         self.process_event(event)
         return
 
