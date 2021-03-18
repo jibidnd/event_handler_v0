@@ -4,7 +4,6 @@ import abc
 import uuid
 import threading
 from decimal import Decimal
-import datetime
 import configparser
 import time
 
@@ -341,17 +340,69 @@ class OrderEvent:
 
             return
     
-    class order_response(base_order_event):
+    class order_fill(base_order_event):
         def __init__(
-            quantity_filled = None,
-            average_fill_price = None,
-            credit = 0,
-            debit = 0,
+            self,
+            order,
+            event_ts,
+            quantity_filled,
+            credit,
+            debit,
             commission = 0
         ):
-            pass
+            super().__init__(
+                event_subtype = c.FILLED,
+                order_type = order[c.ORDER_TYPE],
+                order_class = order[c.ORDER_CLASS],
+                symbol = order[c.SYMBOL],
+                event_ts = event_ts
+            )
+            
+            self.update(order)
+
+            for name, val in [
+                    (c.QUANTITY_FILLED, quantity_filled),
+                    (c.CREDIT, credit),
+                    (c.DEBIT, debit),
+                    (c.COMMISSION, commission)]:
+                self[name] = val
 
 
+    class cash_order(order_fill):
+        def __init__(
+            self,
+            symbol,
+            notional,
+            order_id = None,
+            event_ts = None,
+            memo = None,
+            asset_class = c.STRATEGY,
+            **kwargs
+        ):
+            notional = Decimal(notional)
+            order = {
+                c.ORDER_TYPE: c.CASHFLOW,
+                c.ORDER_CLASS: c.SIMPLE,
+                c.SYMBOL: symbol,
+                c.NOTIONAL: notional,
+                **kwargs
+            }
+            for name, val in [
+                    (c.ORDER_ID, order_id),
+                    (c.MEMO, memo),
+                    (c.ASSET_CLASS, asset_class)]:
+                if val is not None:
+                    order[name] = val
+            super().__init__(
+                order = order,
+                event_ts = event_ts or pd.Timestamp.now(),
+                quantity_filled = notional,
+                credit = 0 if notional >= 0 else -notional,
+                debit = notional if notional >= 0 else 0
+            )
+
+
+            return
 
     class limit_order(base_order_event):
         def __init__(
@@ -390,8 +441,9 @@ class OrderEvent:
             else:
                 raise Exception('Must provide one of quantity or notional')
             # get time
-            now = datetime.datetime.now()
+            now = pd.Timestamp.now()
             for time, val in [
+                    (c.EVENT_TS, event_ts),
                     (c.CREATED_AT, created_at),
                     (c.UPDATED_AT, updated_at)]:
                 self[time] = val or now
@@ -444,8 +496,9 @@ class OrderEvent:
                 raise Exception('Must provide one of quantity or notional')
 
             # get time
-            now = datetime.datetime.now()
+            now = pd.Timestamp.now()
             for time, val in [
+                    (c.EVENT_TS, event_ts),
                     (c.CREATED_AT, created_at),
                     (c.UPDATED_AT, updated_at)]:
                 self[time] = val or now

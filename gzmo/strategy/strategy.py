@@ -1022,12 +1022,6 @@ class Strategy(event_handler.EventHandler):
             pass
         else:
             raise Exception('position must be one of {None, dict, strategy.position.Position}')
-        
-        # default price
-        if symbol in self.datas:
-            default_price = self.get_mark(symbol)
-        else:
-            default_price = None
 
         # add information to order
         info = {
@@ -1040,16 +1034,6 @@ class Strategy(event_handler.EventHandler):
 
         order = {**order, **info}
         order = self.externalize_order(order)
-        
-        # if the target is a child, this is a cashflow. Change a few default arguments
-        if symbol in self.children.values():
-            notional = order.get(c.NOTIONAL) or order.get(c.QUANTITY)
-            order[c.ASSET_CLASS] = c.STRATEGY
-            order[c.EVENT_SUBTYPE] = c.CASHFLOW
-            order[c.CREDIT] = -decimal.Decimal(notional) if notional < 0 else 0
-            order[c.DEBIT] = decimal.Decimal(notional) if notional > 0 else 0
-            # cash flow order = filled order
-            order[c.QUANTITY_FILLED] = notional
 
         return order
 
@@ -1101,6 +1085,7 @@ class Strategy(event_handler.EventHandler):
         _symbol = _order[c.SYMBOL]
         _cash_for_self = (_symbol == self.strategy_id)
         _cash_for_child = (_symbol in self.children.keys())
+
 
         if _cash_for_self:
             # NAV before adding cash
@@ -1168,10 +1153,10 @@ class Strategy(event_handler.EventHandler):
         # pad order with default args: This is to create a properly formatted order, and create a position if none exists yet.
         # Note that create_order automatically converts any child symbols to child strategy_ids
         if order is None:
-            order = OrderEvent.market_order(symbol, quantity)
-        # order = order or {}
-        # symbol = symbol or order.get(c.SYMBOL)
-        # quantity = quantity or order.get(c.QUANTITY)
+            if symbol in self.children.keys():
+                order = OrderEvent.cash_order(symbol, quantity)
+            else:
+                order = OrderEvent.market_order(symbol, quantity)
 
         order = self.prepare_order(order, position = None)
         self.positions_handle_order(order)

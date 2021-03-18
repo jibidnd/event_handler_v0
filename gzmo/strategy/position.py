@@ -73,7 +73,7 @@ class Position(event_handler.EventHandler):
 
         return repr(d)
 
-    def _handle_order(self, order):
+    def _process_order(self, order):
         """Updates the position's attributes with the order.
         
         Orders that are sent for approval (REQUESTED)/ to the broker (SUBMITTED) are treated as submitted,
@@ -132,7 +132,7 @@ class Position(event_handler.EventHandler):
         #     self.credit += order[c.CREDIT]
         #     self.debit += order[c.DEBIT]
         
-        return self.handle_order(order)
+        return self.process_order(order)
 
     @property
     def total_pnl(self):
@@ -190,7 +190,7 @@ class CashPosition(Position):
         self.low_bal = low_bal
 
 
-    def _handle_order(self, order):
+    def _process_order(self, order):
         """Handled order events.
 
         See class docstring of handling of cash flows.
@@ -232,7 +232,7 @@ class CashPosition(Position):
             self.credit += credit
             self.debit += debit
             
-            return self.handle_order(order)
+            return self.process_order(order)
         
         # otherwise handle the order's impact to the cash account
         else:
@@ -269,7 +269,7 @@ class CashPosition(Position):
             elif event_subtype in [c.FAILED, c.EXPIRED, c.CANCELLED, c.REJECTED]:
                 self.quantity_pending -= pending_amount    # prior approx fill price
 
-            return self.handle_order(order)
+            return self.process_order(order)
         
     @property
     def total_pnl(self):
