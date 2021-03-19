@@ -11,11 +11,6 @@ DATA_SOCKET = 'DATA_SOCKET'
 ORDER_SOCKET = 'ORDER_SOCKET'
 COMMUNICATION_SOCKET = 'COMMUNICATION_SOCKET'
 
-# order / position statuses 
-OPEN = 'OPEN'
-CLOSED = 'CLOSED'
-PENDING = 'PENDING'
-
 # event_subtype for orders
 # order statuses
 REQUESTED = 'REQUESTED'         # an order request is created for approval

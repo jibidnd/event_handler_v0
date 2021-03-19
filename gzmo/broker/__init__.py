@@ -261,36 +261,34 @@ class OrderEvent:
             order_class,
             symbol,
             event_ts,
-            ):
-            # ,
-            # # order creation
-            # quantity = None,
-            # notional = None,
-            # time_in_force = c.GTC,
-            # limit_price = None,
-            # stop_price = None,
-            # trail_price = None,
-            # trail_percent = None,
-            # extended_hours = False,
-            # take_profit = None,
-            # stop_loss = None,
-            # # order fills
-            # quantity_filled = None,
-            # average_fill_price = None,
-            # credit = 0,
-            # debit = 0,
-            # commission = 0,
-            # # order info
-            # strategy_id = None,
-            # broker = None,
-            # order_id = uuid.uuid1(),
-            # broker_order_id = None,
-            # event_ts = datetime.datetime.now(),
-            # created_at = datetime.datetime.now(),
-            # updated_at = datetime.datetime.now(),
-            # submitted_at = None,
-            # memo = None,
-            # asset_class = None
+            # order creation
+            quantity = None,
+            notional = None,
+            time_in_force = c.GTC,
+            limit_price = None,
+            stop_price = None,
+            trail_price = None,
+            trail_percent = None,
+            extended_hours = False,
+            take_profit = None,
+            stop_loss = None,
+            # order fills
+            quantity_filled = None,
+            average_fill_price = None,
+            credit = 0,
+            debit = 0,
+            commission = 0,
+            # order info
+            strategy_id = None,
+            broker = None,
+            order_id = uuid.uuid1(),
+            broker_order_id = None,
+            event_ts = datetime.datetime.now(),
+            created_at = datetime.datetime.now(),
+            updated_at = datetime.datetime.now(),
+            submitted_at = None,
+            memo = None,
+            asset_class = None
             # ):
 
             super().__init__(
@@ -298,45 +296,39 @@ class OrderEvent:
                 event_subtype = event_subtype,
                 event_ts = event_ts)
 
-            self.update({
-                c.SYMBOL: symbol,
-                c.ORDER_TYPE: order_type,
-                c.ORDER_CLASS: order_class
-            })
-
-            # for kwarg, name in [
-            #     (order_type, c.ORDER_TYPE),
-            #     (order_class, c.ORDER_CLASS),
-            #     (quantity, c.QUANTITY),
-            #     (notional, c.NOTIONAL),
-            #     (time_in_force, c.TIME_IN_FORCE),
-            #     (limit_price, c.LIMIT_PRICE),
-            #     (stop_price, c.STOP_PRICE),
-            #     (trail_price, c.TRAIL_PRICE),
-            #     (trail_percent, c.TRAIL_PERCENT),
-            #     (extended_hours, c.EXTENDED_HOURS),
-            #     (take_profit, c.TAKE_PROFIT),
-            #     (stop_loss, c.STOP_LOSS),
-            #     # order fills
-            #     (quantity_filled, c.QUANTITY_FILLED),
-            #     (average_fill_price, c.AVERAGE_FILL_PRICE),
-            #     (credit, c.CREDIT),
-            #     (debit, c.DEBIT),
-            #     (commission, c.COMMISSION),
-            #     # order info
-            #     (strategy_id, c.STRATEGY_ID),
-            #     (broker, c.BROKER),
-            #     (order_id, c.ORDER_ID),
-            #     (broker_order_id, c.BROKER_ORDER_ID),
-            #     (event_ts, c.EVENT_TS),
-            #     (created_at, c.CREATED_AT),
-            #     (updated_at, c.UPDATED_AT),
-            #     (submitted_at, c.SUBMITTED_AT),
-            #     (memo, c.MEMO),
-            #     (asset_class, c.ASSET_CLASS)]:
+            for kwarg, name in [
+                (order_type, c.ORDER_TYPE),
+                (order_class, c.ORDER_CLASS),
+                (symbol, c.SYMBOL),
+                (quantity, c.QUANTITY),
+                (notional, c.NOTIONAL),
+                (time_in_force, c.TIME_IN_FORCE),
+                (limit_price, c.LIMIT_PRICE),
+                (stop_price, c.STOP_PRICE),
+                (trail_price, c.TRAIL_PRICE),
+                (trail_percent, c.TRAIL_PERCENT),
+                (extended_hours, c.EXTENDED_HOURS),
+                (take_profit, c.TAKE_PROFIT),
+                (stop_loss, c.STOP_LOSS),
+                # order fills
+                (quantity_filled, c.QUANTITY_FILLED),
+                (average_fill_price, c.AVERAGE_FILL_PRICE),
+                (credit, c.CREDIT),
+                (debit, c.DEBIT),
+                (commission, c.COMMISSION),
+                # order info
+                (strategy_id, c.STRATEGY_ID),
+                (broker, c.BROKER),
+                (order_id, c.ORDER_ID),
+                (broker_order_id, c.BROKER_ORDER_ID),
+                (event_ts, c.EVENT_TS),
+                (created_at, c.CREATED_AT),
+                (updated_at, c.UPDATED_AT),
+                (submitted_at, c.SUBMITTED_AT),
+                (memo, c.MEMO),
+                (asset_class, c.ASSET_CLASS)]:
                 
-            #     if kwarg is not None:
-            #         self[name] = kwarg
+                self[name] = kwarg
 
             return
     

@@ -86,14 +86,11 @@ class Strategy(event_handler.EventHandler):
         # self.children_update_freq = {}      # strategy_id: datetime.timedelta
         self.datas = {}
         self.data_subscriptions = (data_subscriptions or set()) | {self.strategy_id}   # list of topics subscribed to
-        self.open_trades = {}               # trade_id: [position_ids]
-        self.closed_trades = {}             # trade_id: [position_ids]
-        self.open_positions = {}            # position_id: position object
-        self.closed_positions = {}          # position_id: position object  # TODO: closed positions need to be moved to closed_positions from open_positions
+        # self.open_trades = {}               # trade_id: [position_ids]
+        # self.closed_trades = {}             # trade_id: [position_ids]
+        self.positions = {}                 # position_id: position object
         self.shares = None                  # if none specified, shares will be set to $invested when add_cash is called for the first time.
-        self.cash = CashPosition(owner = self.strategy_id); self.open_positions[self.cash.position_id] = self.cash
-        # TODO
-        self.pending_orders = {}            # orders not yet filled: order_id: order_event
+        self.cash = CashPosition(owner = self.strategy_id); self.positions[self.cash.position_id] = self.cash
 
         # Keeping track of time: internally, time will be tracked as local time
         # For communication, (float) timestamps on the second resolution @ UTC will be used.
@@ -332,7 +329,7 @@ class Strategy(event_handler.EventHandler):
             # Check for a cash position to verify that the child's positions have been loaded.
             child_positions_loaded = False
             for i in range(5):
-                child_cash_positions = [pos for pos in self.open_positions.values() if pos.owner == symbol and pos.asset_class == c.CASH]
+                child_cash_positions = list(filter(lambda x: (x.owner == symbol) and (x.asset_class == c.CASH), self.positions.values()))
                 if len(child_cash_positions) > 0:
                     child_positions_loaded = True
                 else:
@@ -660,14 +657,11 @@ class Strategy(event_handler.EventHandler):
                 return obj
         # if looking for a position
         if (obj_type == c.POSITION) or (obj_type == ''):
-            if (position := (self.open_positions.get(identifier) or self.closed_positions.get(identifier))) is not None:
+            if (position := self.positions.get(identifier)) is not None:
                 return position
             else:
                 # try to get positions with matching symbols
-                positions = [pos for pos in self.open_positions.values() if pos.symbol == identifier] + \
-                            [pos for pos in self.closed_positions.values() if pos.symbol == identifier] + \
-                            [pos for pos in self.open_positions.values() if pos.owner == identifier] + \
-                            [pos for pos in self.closed_positions.values() if pos.owner == identifier]
+                positions = list(filter(lambda x: (x.symbol == identifier) or (x.owner == identfier), self.positions.values()))
                 if len(positions) > 0:
                     return positions
         # Otherwise see if there is a property/method with name identifier.
@@ -700,7 +694,7 @@ class Strategy(event_handler.EventHandler):
         # Get values of all non-strategy open positions of the strategy.
         # This will include all assets owned by any child strategies.
         if identifier is None:
-            for position in self.open_positions.values():
+            for position in filter(lambda x: ~x.is_closed, self.positions.values()):
                 if position.asset_class != c.STRATEGY:
                     if position.quantity_open != 0:
                         nav += self.get_mark(position.symbol) * position.quantity_open
@@ -710,7 +704,7 @@ class Strategy(event_handler.EventHandler):
             # either a child strategy, or a non-strategy asset.
             # If it is a strategy, sum up the values of all assets under that strategy,
             # if it is a non-strategy asset, sum up the values of all positions under the specified symbol.
-            for position in self.open_positions.values():
+            for position in filter(lambda x: ~x.is_closed, self.positions.values()):
                 if (position.owner == identifier) or ((position.symbol == identifier) and (position.asset_class != c.STRATEGY)): # ??
                     if position.quantity_open != 0:
                         nav += self.get_mark(position.symbol) * position.quantity_open
@@ -727,7 +721,7 @@ class Strategy(event_handler.EventHandler):
         identifier = identifier or self.strategy_id
 
         ncf = 0
-        for position in self.open_positions.values():
+        for position in filter(lambda x: ~x.is_closed, self.positions.values()):
             if (position.owner == identifier) or (position.symbol == identifier):
                 ncf += (position.credit - position.debit)
         return ncf
@@ -758,7 +752,7 @@ class Strategy(event_handler.EventHandler):
                 shares = self.shares
             else:
                 position = None
-                for position_i in self.open_positions.values():
+                for position_i in filter(lambda x: ~x.is_closed, self.positions.values()):
                     if position_i.symbol == identifier:
                         position = position_i
                         break
@@ -792,7 +786,7 @@ class Strategy(event_handler.EventHandler):
     def get_openpositionsummary(self):
         """Summarize current positions on the owner/symbol level"""
         d = {}
-        for position in self.open_positions.values():
+        for position in filter(lambda x: ~x.is_closed, self.positions.values()):
             if position.owner not in d.keys():
                 d[position.owner] = {}
                 d[position.owner][position.symbol] = position.get_summary()
@@ -824,7 +818,7 @@ class Strategy(event_handler.EventHandler):
                         asset_class = owner_symbol_summary['asset_class'])
                 # update the dummy position with details
                 position.__dict__.update(owner_symbol_summary)
-                self.open_positions[position.position_id] = position
+                self.positions[position.position_id] = position
 
 
     #TODO
@@ -960,7 +954,7 @@ class Strategy(event_handler.EventHandler):
     # Action stuff
     # ----------------------------------------------------------------------------------------------------
     def create_position(self, symbol, owner = None, asset_class = None, trade_id = None, position_id = None):
-        """Creates a position and add it to self.open_positions.
+        """Creates a position and add it to self.positions.
 
         Args:
             symbol (str): The symbol of the asset for the position.
@@ -980,7 +974,7 @@ class Strategy(event_handler.EventHandler):
         asset_class = asset_class or default_asset_class
 
         position = Position(symbol = symbol, owner = owner, asset_class = asset_class, trade_id = trade_id, position_id = position_id)
-        self.open_positions[position.position_id] = position
+        self.positions[position.position_id] = position
         return position
 
     def prepare_order(self, order, position = None):
@@ -1009,7 +1003,7 @@ class Strategy(event_handler.EventHandler):
         # assign the order to a position
         if position is None:
             # If there is a position with the symbol already, use the latest one of the positions with the same symbol
-            current_positions_in_symbol = [pos for pos in self.open_positions.values() if pos.symbol == symbol and pos.owner == _owner]
+            current_positions_in_symbol = filter(lambda pos: (~pos.is_closed) and (pos.symbol == symbol) and (pos.owner == _owner), self.positions.values())
             if len(current_positions_in_symbol) > 0:
                 position = current_positions_in_symbol[-1]
             else:
@@ -1104,9 +1098,10 @@ class Strategy(event_handler.EventHandler):
         # a "regular" order. Update the corresponding symbol's position and cash position
         # find a corresponding position; otherwise create one
         if _order[c.STRATEGY_ID] == self.strategy_id:
-            position = self.open_positions[_order[c.POSITION_ID]]
+            position = positions[_order[c.POSITION_ID]]
         else:
-            matching_positions = [position for position in self.open_positions.values() if (position.owner == _owner) and (position.symbol == _symbol)]
+            filter(lambda pos: ~pos.is_closed, self.positions.values())
+            matching_positions = list(filter(filter(lambda pos: (~pos.is_closed) and (pos.owner == _owner) and (pos.symbol == _symbol), self.positions.values())))
             if len(matching_positions) == 0:
                 raise Exception(f'No position for {_symbol} by {_owner} found')
             else:
@@ -1115,7 +1110,7 @@ class Strategy(event_handler.EventHandler):
         position._handle_event(_order)
 
         # also find a corresponding cash position
-        matching_cash_positions = [position for position in self.open_positions.values() if (position.owner == _owner) and (position.asset_class == c.CASH)]
+        matching_cash_positions = list(filter(filter(lambda pos: (~pos.is_closed) and (pos.owner == _owner) and (pos.asset_class == c.CASH), self.positions.values())))
         if len(matching_cash_positions) == 0:
             raise Exception(f'No cash position of {_owner} found')
         else:
@@ -1127,7 +1122,7 @@ class Strategy(event_handler.EventHandler):
         if _cash_for_child:
             # a cash flow event to a child
             # get receiver cash position
-            receiver_cash_positions = [position for position in self.open_positions.values() if (position.owner == _symbol) and (position.asset_class == c.CASH)]
+            receiver_cash_positions = list(filter(filter(lambda pos: (~pos.is_closed) and (pos.owner == _symbol) and (pos.asset_class == c.CASH), self.positions.values())))
             if len(receiver_cash_positions) == 0:
                 raise Exception(f'No cash position of {_symbol} found')
             else:
@@ -1249,7 +1244,7 @@ class Strategy(event_handler.EventHandler):
 
         # get position quantities
         eq_curves = {}
-        for pos in list(self.open_positions.values()) + list(self.closed_positions.values()):
+        for pos in self.positions.values():
             # skip strategies---we will aggregate the underlying posiitons directly
             if pos.asset_class != c.STRATEGY:
                 quantities = pd.Series(data = pos.quantity_history[1], index = pos.quantity_history[0])

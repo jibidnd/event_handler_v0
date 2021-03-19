@@ -1,6 +1,6 @@
 import importlib
 
-def _str_to_fn(self, fn_as_str):
+def _str_to_fn(fn_as_str):
     """Converts a function with the passed name, if defined.
 
         If the argument is not a string, returns whatever was passed in.
