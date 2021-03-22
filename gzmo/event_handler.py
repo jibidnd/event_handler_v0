@@ -15,8 +15,10 @@ import uuid
 import abc
 
 import pandas as pd
+import zmq
 
 from .utils import constants as c
+from . import utils
 
 
 class EventHandler(abc.ABC):
@@ -47,7 +49,12 @@ class EventHandler(abc.ABC):
     """
 
     def __init__(self):
-        pass
+
+        self.data_socket = None
+        self.order_socket = None
+        self.communication_socket = None
+        self.logging_socket = None
+        self.next_events = {}
     
     # -------------------------------------------------------------------
 
@@ -79,6 +86,64 @@ class EventHandler(abc.ABC):
     
     def _start(self):
         """Start the main event loop."""
+        pass
+    
+    def _get_next_events(self):
+        """Fills self.next_events to get next event to be processed."""
+        if (self.next_events.get(c.COMMUNICATION_SOCKET) is None) and (self.communication_socket is not None):
+            try:
+                event = self.communication_socket.recv(zmq.NOBLOCK)
+                self.next_events[c.COMMUNICATION_SOCKET] = utils.unpackb(event)
+            except zmq.ZMQError as exc:
+                if exc.errno == zmq.EAGAIN:
+                    # Nothing to grab
+                    pass
+                else:
+                    raise
+        
+        if (self.next_events.get(c.DATA_SOCKET) is None) and (self.data_socket is not None):
+            try:
+                topic, event = self.data_socket.recv_multipart(zmq.NOBLOCK)
+                self.next_events[c.DATA_SOCKET] = utils.unpackb(event)
+            except zmq.ZMQError as exc:
+                if exc.errno == zmq.EAGAIN:
+                    # Nothing to grab
+                    pass
+                else:
+                    raise
+
+        if (self.next_events.get(c.ORDER_SOCKET) is None) and (self.order_socket is not None):
+            try:
+                event = self.order_socket.recv(zmq.NOBLOCK)
+                self.next_events[c.ORDER_SOCKET] = utils.unpackb(event)
+            except zmq.ZMQError as exc:
+                if exc.errno == zmq.EAGAIN:
+                    # Nothing to grab
+                    pass
+                else:
+                    raise
+
+    def next(self):
+        """Processes the next event.
+
+            Returns True if something was processed,
+            otherwise returns False.
+        """
+
+        had_activity = False
+
+        self._get_next_events()
+
+        # Now we can sort the upcoming events and process the next event
+        if len(self.next_events) > 0:
+            # Handle the socket with the next soonest event (by EVENT_TS)
+            # take the first item (socket name) of the first item ((socket name, event)) of the sorted queue
+            next_socket = sorted(self.next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
+            next_event = self.next_events.pop(next_socket)        # remove the event from next_events
+            self._handle_event(next_event)
+            had_activity = True
+        
+        return had_activity
     
     def _before_stop(self):
         """Class internal method for actions prior to exiting.

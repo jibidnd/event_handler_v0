@@ -52,6 +52,7 @@ class SimpleBroker(BaseBroker):
         self.open_orders = {}                   # better to refer to orders by id so we can refer to the same order even if attributes change
         self.closed_orders = []
         self.data_cache = defaultdict(lambda: deque(maxlen = 1))    # to handle left- or center- aligned bars
+        self.clock = pd.Timestamp(0.0)          # This is directly linked to the latest event's 
     
     # ----------------------------------------------------------------------------------------
     # Event handling
@@ -64,18 +65,45 @@ class SimpleBroker(BaseBroker):
         Args:
             data (dict): Data event.
         """
-        # first update clock
-        # self.clock = data[c.EVENT_TS]
-        # try to fill any existing open orders
-        fills = self.try_fill_with_data(data)
-        # emit the order if there are any fills
-        if (fills is not None) and (self.order_socket is not None):            
-            for order in fills:
-                order_packed = utils.packb(order)
-                self.order_socket.send(order_packed, flags = zmq.NOBLOCK)
+        if (symbol := data.get(c.SYMBOL)) is not None:
+            self.data_cache[symbol] = data
+            self.clock = data[c.EVENT_TS]
+            # try to fill any existing open orders
+            fills = self.try_fill_with_data(data)
+            # emit the order if there are any fills
+            if (fills is not None) and (self.order_socket is not None):            
+                for order in fills:
+                    # order_packed = utils.packb(order)
+                    # self.order_socket.send(order_packed, flags = zmq.NOBLOCK)
+                    self._handle_event(order)
 
-        self.process_data(data)
+            self.process_data(data)
         return
+
+    def _process_order(self, order):
+        """Override parent method to allow for fills with cached data.
+
+            Does the usual _process_order stuff from parents, then
+                attempts to fill the order with any cached data.
+            This may be useful if bars are left-aligned, and we'd like to
+                place an order at the open. The order's event_ts must be
+                weakly greater than that of the left edge of the bar.
+        """
+        super()._process_order(order)
+        # note: self.process_order will already have been called at this point.
+        for symbol, data in self.data_cache.items():    # data is a deque
+            if data:
+                fills = self.try_fill_with_data(data)
+                # emit the order if there are any fills
+                if (fills is not None) and (self.order_socket is not None):            
+                    for order in fills:
+                        # order_packed = utils.packb(order)
+                        # self.order_socket.send(order_packed, flags = zmq.NOBLOCK)
+                        self._handle_event(order)
+        
+        return
+
+
 
     def _place_order(self, order):
         """Handles an incoming order and respond with a "RECEIVED" order event.
@@ -97,6 +125,8 @@ class SimpleBroker(BaseBroker):
                     _order[c.QUANTITY_OPEN] = _order[c.QUANTITY]
                 if _order.get(c.QUANTITY_FILLED) is None:
                     _order[c.QUANTITY_FILLED] = 0
+                # update received ts
+                _order[c.EVENT_TS] = self.clock
                 # Add to the collection
                 self.open_orders[order_id] = _order
 
@@ -120,7 +150,7 @@ class SimpleBroker(BaseBroker):
             else:
                 raise NotImplementedError(f'Order type {order_type} not supported')
         
-        self.place_order(self, order)
+        self.place_order(order)
         return response
 
     def try_fill_with_data(self, data):
@@ -147,14 +177,12 @@ class SimpleBroker(BaseBroker):
             if ((symbol_order := open_order[c.SYMBOL]) == symbol_data):
 
                 # If there is a fill (partial or complete)
+                # self.fill_method should also have already updated the order
+                #   with any quantities/status changes
                 if self.fill_method(open_order, data):
                     # can forget this order if the order is fully filled
                     if open_order[c.QUANTITY_OPEN] == 0:
                         closed.append(order_id)
-                        open_order[c.EVENT_SUBTYPE] = c.FILLED
-                    else:
-                        open_order[c.EVENT_SUBTYPE] = c.PARTIALLY_FILLED
-                    
                     fills.append(open_order.copy())
         
         # closed orders from self.open_orders to self.closed_orders
@@ -178,9 +206,9 @@ def immediate_fill(order, data, fill_strategy = c.CLOSE, commission = 0.0):
             If a callable is provided, must take arguments `order` and `data` and
                 return the fill price.
             Defaults to c.CLOSE.
-    """    
+    """
 
-    assert order.get(c.QUANTITY_OPEN) != 0, 'Nothing to fill.'
+    assert order.get(c.QUANTITY_OPEN) != 0, f'{order}'#'Nothing to fill.'
 
     # Get start of data event. Only use this data event to fill
     # orders that were placed prior to the start, to avoid data snooping
@@ -238,7 +266,7 @@ def immediate_fill(order, data, fill_strategy = c.CLOSE, commission = 0.0):
             raise NotImplementedError
     else:
         raise NotImplementedError
-    
+
     # Update the order if there is a fill
     if p is not None:
         # note that dictionaries are mutable
@@ -251,6 +279,12 @@ def immediate_fill(order, data, fill_strategy = c.CLOSE, commission = 0.0):
         order[c.DEBIT] += q * p if (is_buy) else 0
         order[c.AVERAGE_FILL_PRICE] = abs(order[c.CREDIT] - order[c.DEBIT]) / order[c.QUANTITY_FILLED]
         order[c.EVENT_TS] = data_end
+        # update the fill status
+        if order[c.QUANTITY_OPEN] == 0:
+            order[c.EVENT_SUBTYPE] = c.FILLED
+        else:
+            order[c.EVENT_SUBTYPE] = c.PARTIALLY_FILLED
         return True
+    
     else:
         return False

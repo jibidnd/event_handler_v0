@@ -50,7 +50,7 @@ class Position(event_handler.EventHandler):
         self.asset_class = asset_class
         self.trade_id = trade_id or str(uuid.uuid1())
         self.position_id = position_id or str(uuid.uuid1())
-        self.is_closed = True
+        self.is_closed = False
         self.risk = None
         self.quantity_open = decimal.Decimal('0.0')
         # self.quantity_pending = decimal.Decimal('0.0')
@@ -103,8 +103,6 @@ class Position(event_handler.EventHandler):
 
         if event_subtype == c.REQUESTED:
             # Order has been sent for approval
-            # Treat orders as submitted
-            self.quantity_pending += order.get(c.QUANTITY) or 0
             self.open_orders[order[c.ORDER_ID]] = order
         elif event_subtype == c.SUBMITTED:
             pass
@@ -125,7 +123,7 @@ class Position(event_handler.EventHandler):
                 order_filled = False
                 if open_order.get(c.QUANTITY) is not None:
                     open_order[c.QUANTITY] -= order[c.QUANTITY]
-                    order_filled = (open_order[c.QUANTITY] == 0.0:)
+                    order_filled = (open_order[c.QUANTITY] == 0.0)
                 elif open_order.get(c.NOTIONAL) is not None:
                     open_order[c.NOTIONAL] += (order[c.CREDIT] - order[c.DEBIT])
                     order_filled = (open[c.NOTIONAL] == 0.0)
@@ -189,9 +187,10 @@ class CashPosition(Position):
             below `low_bal`.
     """
     def __init__(self, owner, low_bal = 100):
-        super().__init__(symbol = c.CASH, owner = owner, asset_class = c.CASH)
+        super().__init__(symbol = owner, owner = owner, asset_class = c.CASH)
         self.investment = 0
         self.low_bal = low_bal
+        self.quantity_pending = decimal.Decimal('0.0')
 
 
     def _process_order(self, order):
@@ -210,7 +209,7 @@ class CashPosition(Position):
         # log the transaction
         self.transactions.append(order)
         event_subtype = order[c.EVENT_SUBTYPE]
-        iscashflow = event_subtype == c.CASHFLOW
+        iscashflow = order[c.ORDER_TYPE] == c.CASHFLOW
         isfromhere = (order[c.STRATEGY_ID] == self.owner)
         isforhere = (order[c.SYMBOL] == self.owner)
 
@@ -222,19 +221,18 @@ class CashPosition(Position):
         commission = order.get(c.COMMISSION) or decimal.Decimal(0.0)
         credit = order[c.CREDIT]
         debit = order[c.DEBIT]
-        net = credit - debit
         
 
         # some special handling if it is a cashflow
         if iscashflow:
-            if (not isfromhere) and isforhere:
-                net = -net
-                # flip signs
-                credit = net if net > 0 else 0
-                debit = -net if net < 0 else 0
+            # increment the investment if the cash is for here
+            if isforhere:
+                self.investment += (credit - debit)
+                # An order from `add_cash` would be for here but also from here
+                if (not isfromhere):
+                    credit, debit = debit, credit
 
             pending_amount = 0
-            self.investment += (credit - debit)
             self.quantity_open += (credit - debit)
             self.credit += credit
             self.debit += debit
@@ -281,3 +279,16 @@ class CashPosition(Position):
     @property
     def total_pnl(self):
         return 0.0
+    
+    def __str__(self):
+        """Summary of the position as string representation.
+
+        Returns:
+            str: Summary of the position.
+        """
+        keys = ['owner', 'symbol', 'position_id', 'quantity_open', 'quantity_pending']
+        d = {}
+        for key in keys:
+            d.update({key: self.__dict__[key]})
+
+        return repr(d)

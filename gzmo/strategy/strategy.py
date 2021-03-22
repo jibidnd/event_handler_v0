@@ -66,6 +66,8 @@ class Strategy(event_handler.EventHandler):
     def __init__(self, name = None, zmq_context = None, communication_address = None,
                     data_address = None, order_address = None, logging_addresses = None,
                     data_subscriptions = None, params = None, rms = None, local_tz = 'America/New_York'):
+        super().__init__()
+        
         # initialization params
         self.name = name
         self.zmq_context = zmq_context or zmq.Context.instance()
@@ -97,13 +99,7 @@ class Strategy(event_handler.EventHandler):
         self.clock = pd.Timestamp(0)
         self._shutdown_flag = threading.Event()
 
-
         # Connection things
-        self.communication_socket = None
-        self.data_socket = None
-        self.order_socket = None
-        self.logging_socket = None
-
         if self.communication_address is not None:
             self.connect_communication_socket(communication_address)
         if self.data_address is not None:
@@ -351,17 +347,17 @@ class Strategy(event_handler.EventHandler):
         amount = decimal.Decimal(amount)
         nav_0 = self.get_nav()
 
-        cash = {
-            c.STRATEGY_ID: self.strategy_id,
-            c.EVENT_TYPE: c.ORDER,
-            c.EVENT_SUBTYPE: c.CASHFLOW,
-            c.EVENT_TS: self.clock,
-            c.SYMBOL: self.strategy_id,
-            c.ASSET_CLASS: c.STRATEGY,
-            c.CREDIT: amount if amount > 0 else 0,
-            c.DEBIT: amount if amount < 0 else 0
-        }
-        self.cash._handle_event(cash)
+        cash_order = OrderEvent.cash_order(
+            symbol = self.strategy_id,
+            notional = amount,
+            event_ts = self.clock
+        )
+        # Need to flip credit and debit since OrderEvent.cash_order is initialized
+        # to be external facing
+        cash_order[c.CREDIT], cash_order[c.DEBIT] = cash_order[c.DEBIT], cash_order[c.CREDIT]
+        cash_order = self.prepare_order(cash_order)
+
+        self.cash._handle_event(cash_order)
 
         # dilute shares so that the mark of the position is not changed by adding cash
         if self.shares is None:
@@ -408,52 +404,10 @@ class Strategy(event_handler.EventHandler):
             session_shutdown_flag = self._shutdown_flag
             session_shutdown_flag.clear()
 
-        # the event 'queue'
-        next_events = {}
-
         while (not session_shutdown_flag.is_set()) and (not self._shutdown_flag.is_set()):
-
-            if (next_events.get(c.COMMUNICATION_SOCKET) is None) and (self.communication_socket is not None):
-                try:
-                    event = self.communication_socket.recv(zmq.NOBLOCK)
-                    next_events[c.COMMUNICATION_SOCKET] = utils.unpackb(event)
-                except zmq.ZMQError as exc:
-                    if exc.errno == zmq.EAGAIN:
-                        # Nothing to grab
-                        pass
-                    else:
-                        raise
-            
-            if (next_events.get(c.DATA_SOCKET) is None) and (self.data_socket is not None):
-                try:
-                    topic, event = self.data_socket.recv_multipart(zmq.NOBLOCK)
-                    next_events[c.DATA_SOCKET] = utils.unpackb(event)
-                except zmq.ZMQError as exc:
-                    if exc.errno == zmq.EAGAIN:
-                        # Nothing to grab
-                        pass
-                    else:
-                        raise
-
-            if (next_events.get(c.ORDER_SOCKET) is None) and (self.order_socket is not None):
-                try:
-                    topic, event = self.order_socket.recv_multipart(zmq.NOBLOCK)
-                    next_events[c.ORDER_SOCKET] = utils.unpackb(event)
-                except zmq.ZMQError as exc:
-                    if exc.errno == zmq.EAGAIN:
-                        # Nothing to grab
-                        pass
-                    else:
-                        raise
-
-            # Now we can sort the upcoming events and process the next event
-            if len(next_events) > 0:
-                # Handle the socket with the next soonest event (by EVENT_TS)
-                # take the first item (socket name) of the first item ((socket name, event)) of the sorted queue
-                next_socket = sorted(next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
-                next_event = next_events.pop(next_socket)        # remove the event from next_events
-                self._handle_event(next_event)
-            else:
+            if not self.next():
+                # so we don't take up too much resources when backtesting by
+                # going in an empty infinitely loop
                 time.sleep(pause)
 
     def _before_stop(self):
@@ -661,7 +615,7 @@ class Strategy(event_handler.EventHandler):
                 return position
             else:
                 # try to get positions with matching symbols
-                positions = list(filter(lambda x: (x.symbol == identifier) or (x.owner == identfier), self.positions.values()))
+                positions = list(filter(lambda x: (x.symbol == identifier) or (x.owner == identifier), self.positions.values()))
                 if len(positions) > 0:
                     return positions
         # Otherwise see if there is a property/method with name identifier.
@@ -992,7 +946,6 @@ class Strategy(event_handler.EventHandler):
             event.order_event: A properly formatted order associated with a position.
         """
         """Note that order does not impact strategy until it is actually placed"""
-
         _owner = order.get(c.STRATEGY_ID) or self.strategy_id
         symbol = order[c.SYMBOL]
 
@@ -1003,7 +956,7 @@ class Strategy(event_handler.EventHandler):
         # assign the order to a position
         if position is None:
             # If there is a position with the symbol already, use the latest one of the positions with the same symbol
-            current_positions_in_symbol = filter(lambda pos: (~pos.is_closed) and (pos.symbol == symbol) and (pos.owner == _owner), self.positions.values())
+            current_positions_in_symbol = list(filter(lambda pos: (~pos.is_closed) and (pos.symbol == symbol) and (pos.owner == _owner), self.positions.values()))
             if len(current_positions_in_symbol) > 0:
                 position = current_positions_in_symbol[-1]
             else:
@@ -1017,18 +970,21 @@ class Strategy(event_handler.EventHandler):
         else:
             raise Exception('position must be one of {None, dict, strategy.position.Position}')
 
-        # add information to order
+        # add information to order if not already there
+        # for orders from children, the position_id and trade_id will not match
+        # the ones the ones that are used in the parent position,
+        # since the ones that are used in the parent position are aggregated on
+        # the owner/symbol level
         info = {
-            c.STRATEGY_ID: self.strategy_id,
-            c.TRADE_ID: position.trade_id,
-            c.POSITION_ID: position.position_id,
+            c.STRATEGY_ID: _owner,
+            c.TRADE_ID: order.get(c.TRADE_ID) or position.trade_id,
+            c.POSITION_ID: order.get(c.POSITION_ID) or position.position_id,
             c.ORDER_ID: order.get(c.ORDER_ID) or str(uuid.uuid1()),
             c.EVENT_TS: self.clock
         }
 
         order = {**order, **info}
         order = self.externalize_order(order)
-
         return order
 
     def internalize_order(self, order):
@@ -1043,7 +999,6 @@ class Strategy(event_handler.EventHandler):
         _order = copy.deepcopy(order)
         if (symbol := _order.get(c.SYMBOL)) in self.children.values():
             _order[c.SYMBOL] = [k for k, v in self.children.items() if v == symbol][0]
-
         # same for owner
         if (owner := _order.get(c.STRATEGY_ID)) in self.children.values():
             _order[c.STRATEGY_ID] = [k for k, v in self.children.items() if v == owner][0]
@@ -1069,7 +1024,7 @@ class Strategy(event_handler.EventHandler):
         return order
 
     def positions_handle_order(self, order):
-        """Have the strategy's positions handle an internalized order.
+        """Have the strategy's positions handle an order.
 
         Args:
             order (event.order_event): order to process.
@@ -1080,7 +1035,7 @@ class Strategy(event_handler.EventHandler):
         _cash_for_self = (_symbol == self.strategy_id)
         _cash_for_child = (_symbol in self.children.keys())
 
-
+        # If cash for self, update the cash position and we're done
         if _cash_for_self:
             # NAV before adding cash
             nav_0 = self.get_nav()
@@ -1095,13 +1050,16 @@ class Strategy(event_handler.EventHandler):
                 self.shares = self.shares * (self.get_nav() + amount) / nav_0
             return
 
-        # a "regular" order. Update the corresponding symbol's position and cash position
-        # find a corresponding position; otherwise create one
+
+        # Otherwise this is an order for other strategies/assets
+        # if this strategy owns this order
         if _order[c.STRATEGY_ID] == self.strategy_id:
-            position = positions[_order[c.POSITION_ID]]
+            position = self.positions[_order[c.POSITION_ID]]
+            position._handle_event(_order)
+        # otherwise find the position that owns this order
         else:
             filter(lambda pos: ~pos.is_closed, self.positions.values())
-            matching_positions = list(filter(filter(lambda pos: (~pos.is_closed) and (pos.owner == _owner) and (pos.symbol == _symbol), self.positions.values())))
+            matching_positions = list(filter(lambda pos: (~pos.is_closed) and (pos.owner == _owner) and (pos.symbol == _symbol), self.positions.values()))
             if len(matching_positions) == 0:
                 raise Exception(f'No position for {_symbol} by {_owner} found')
             else:
@@ -1109,8 +1067,8 @@ class Strategy(event_handler.EventHandler):
         # have the corresponding position handle the order
         position._handle_event(_order)
 
-        # also find a corresponding cash position
-        matching_cash_positions = list(filter(filter(lambda pos: (~pos.is_closed) and (pos.owner == _owner) and (pos.asset_class == c.CASH), self.positions.values())))
+        # Also need to update the cash positions
+        matching_cash_positions = list(filter(lambda pos: (~pos.is_closed) and (pos.owner == _owner) and (pos.asset_class == c.CASH), self.positions.values()))
         if len(matching_cash_positions) == 0:
             raise Exception(f'No cash position of {_owner} found')
         else:
@@ -1122,7 +1080,7 @@ class Strategy(event_handler.EventHandler):
         if _cash_for_child:
             # a cash flow event to a child
             # get receiver cash position
-            receiver_cash_positions = list(filter(filter(lambda pos: (~pos.is_closed) and (pos.owner == _symbol) and (pos.asset_class == c.CASH), self.positions.values())))
+            receiver_cash_positions = list(filter(lambda pos: (~pos.is_closed) and (pos.owner == _symbol) and (pos.asset_class == c.CASH), self.positions.values()))
             if len(receiver_cash_positions) == 0:
                 raise Exception(f'No cash position of {_symbol} found')
             else:
@@ -1232,14 +1190,16 @@ class Strategy(event_handler.EventHandler):
 
         # If data is not provided, use self.datas
         if data is None:
-            data = pd.concat([
-                pd.DataFrame(data = {lines.symbol: lines.mark}, index = lines.index)
-                # lines.as_pandas_df(columns = lines.mark_line).rename(columns = {lines.mark_line: lines.symbol})
-                for lines in self.datas.values()
-            ], axis = 1).sort_index()
-            data = data.fillna(method = 'ffill').fillna(decimal.Decimal('0.0'))
-            data[c.CASH] = decimal.Decimal('1.0')
+        #     data = pd.concat([
+        #         pd.DataFrame(data = {lines.symbol: lines.mark}, index = lines.index)
+        #         # lines.as_pandas_df(columns = lines.mark_line).rename(columns = {lines.mark_line: lines.symbol})
+        #         for lines in self.datas.values()
+        #     ], axis = 1).sort_index()
+        #     data = data.fillna(method = 'ffill').fillna(decimal.Decimal('0.0'))
+        #     data[c.CASH] = decimal.Decimal('1.0')
+            data = {lines.symbol: pd.Series(data = lines.mark, index = lines.index) for lines in self.datas.values()}
         else:
+            # data should be a dataframe
             data = data.applymap(decimal.Decimal)
 
         # get position quantities
@@ -1249,15 +1209,18 @@ class Strategy(event_handler.EventHandler):
             if pos.asset_class != c.STRATEGY:
                 quantities = pd.Series(data = pos.quantity_history[1], index = pos.quantity_history[0])
                 # Get data with corresponding symbol
-                try:
-                    marks = data[pos.symbol]
-                except KeyError:
-                    raise Exception(f'No data for {pos.symbol} provided.')
-                # Need to align with data's index and ffill the gaps
-                idx = set(quantities.index) | set(marks.index)
-                quantities = quantities.reindex(idx).sort_index()
-                quantities = quantities.fillna(method = 'ffill').fillna(decimal.Decimal('0.0'))
-                quantities = quantities.reindex(marks.index)
+                if pos.asset_class == c.CASH:
+                    marks = decimal.Decimal('1.00')
+                else:
+                    try:
+                        marks = data[pos.symbol]
+                    except KeyError:
+                        raise Exception(f'No data for {pos.symbol} provided.')
+                    # Need to align with data's index and ffill the gaps
+                    idx = set(quantities.index) | set(marks.index)
+                    quantities = quantities.reindex(idx).sort_index()
+                    quantities = quantities.fillna(method = 'ffill').fillna(decimal.Decimal('0.0'))
+                    quantities = quantities.reindex(marks.index)
                 eq_curve = quantities * marks
 
                 name = f'{pos.owner.replace(self.strategy_id, self.name)}_{pos.symbol}_{pos.position_id}'

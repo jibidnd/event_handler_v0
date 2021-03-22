@@ -15,7 +15,7 @@ from .. import utils
 from ..utils import constants as c
 
 
-class BaseBroker(event_handler.EventHandler):
+class BaseBroker(event_handler.EventHandler, abc.ABC):
     """A broker is an interface that takes orders and/or data, and return responses to orders.
 
     The responses can either be sent via a socket (which the receiving end will connect to),
@@ -50,6 +50,8 @@ class BaseBroker(event_handler.EventHandler):
             name (str): A human readable name for the broker.
             zmq_context (zmq.Context, optional): ZMQ context on which sockets will be established. Defaults to None.
         """        
+        super().__init__()
+
         # initialization params
         self.name = name
         self.broker_id = str(uuid.uuid1())  # Note that this shows the network address.
@@ -68,9 +70,6 @@ class BaseBroker(event_handler.EventHandler):
         self.data_address = None
         self.order_address = None
         self.logging_addresses = None
-        self.data_socket = None
-        self.order_socket = None
-        self.logging_socket = None
         
         self._shutdown_flag = threading.Event()
 
@@ -152,11 +151,23 @@ class BaseBroker(event_handler.EventHandler):
  
     # @abc.abstractmethod
     def format_order_out(self, order):
+        """Format order for external connections (e.g. to an actual broker)."""
         return order
     
     # @abc.abstractmethod
     def format_order_in(self, order):
+        """Format order for internal consumption (e.g. for strategies)."""
         return order
+    
+    @abc.abstractmethod
+    def _place_order(self, order):
+        """Takes an order and returns any responses."""
+        self.place_order(order)
+        return
+    
+    def place_order(self, order):
+        """To be overriden for desired custom action when placing orders."""
+        return
 
     def _start(self, session_shutdown_flag = None, pause = 1):
         """Processes events from sockets.
@@ -170,49 +181,11 @@ class BaseBroker(event_handler.EventHandler):
             session_shutdown_flag = self._shutdown_flag
             session_shutdown_flag.clear()
 
-        # the event "queue"
-        next_events = {}
-
         while (not session_shutdown_flag.is_set()) and (not self._shutdown_flag.is_set()):
-            
-            # get from data socket if slot is empty
-            if (next_events.get(c.DATA_SOCKET) is None) and (self.data_socket is not None):
-                try:
-                    # This is a SUB
-                    topic, event_packed = self.data_socket.recv_multipart(zmq.NOBLOCK)
-                    next_events[c.DATA_SOCKET] = utils.unpackb(event_packed)
-                except zmq.ZMQError as exc:
-                    # nothing to get
-                    if exc.errno == zmq.EAGAIN:
-                        pass
-                    else:
-                        raise
-            
-            # get from order socket if slot is empty
-            if (next_events.get(c.ORDER_SOCKET) is None) and (self.order_socket is not None):
-                try:
-                    # This is a dealer
-                    order_packed = self.order_socket.recv(zmq.NOBLOCK)
-                    order_unpacked = utils.unpackb(order_packed)
-                    next_events[c.ORDER_SOCKET] = order_unpacked
-                except zmq.ZMQError as exc:
-                    # nothing to get
-                    if exc.errno == zmq.EAGAIN:
-                        pass
-                    else:
-                        raise
 
-            # Sort the events
-            if len(next_events) > 0:
-                # Handle the socket with the next soonest event (by EVENT_TS)
-                next_socket = sorted(next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
-                next_event = next_events.pop(next_socket)        # remove the event from next_events
-                # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
-                if (tempts := next_event[c.EVENT_TS]) > self.clock:
-                    self.clock = tempts
-                self._handle_event(next_event)
-            else:
+            if not self.next():
                 time.sleep(pause)
+    
 
     def _process_order(self, order):
         """Class method to process an incoming order events.
@@ -255,41 +228,40 @@ class OrderEvent:
     class base_order_event(event_handler.Event):
 
         def __init__(
-            self,
-            event_subtype,
-            order_type,
-            order_class,
-            symbol,
-            event_ts,
-            # order creation
-            quantity = None,
-            notional = None,
-            time_in_force = c.GTC,
-            limit_price = None,
-            stop_price = None,
-            trail_price = None,
-            trail_percent = None,
-            extended_hours = False,
-            take_profit = None,
-            stop_loss = None,
-            # order fills
-            quantity_filled = None,
-            average_fill_price = None,
-            credit = 0,
-            debit = 0,
-            commission = 0,
-            # order info
-            strategy_id = None,
-            broker = None,
-            order_id = uuid.uuid1(),
-            broker_order_id = None,
-            event_ts = datetime.datetime.now(),
-            created_at = datetime.datetime.now(),
-            updated_at = datetime.datetime.now(),
-            submitted_at = None,
-            memo = None,
-            asset_class = None
-            # ):
+                self,
+                event_subtype,
+                order_type,
+                order_class,
+                symbol,
+                order_id = str(uuid.uuid1()),
+                event_ts = pd.Timestamp.now(),
+                created_at = pd.Timestamp.now(),
+                updated_at = pd.Timestamp.now(),
+                # order creation
+                quantity = None,
+                notional = None,
+                time_in_force = c.GTC,
+                limit_price = None,
+                stop_price = None,
+                trail_price = None,
+                trail_percent = None,
+                extended_hours = False,
+                take_profit = None,
+                stop_loss = None,
+                # order fills
+                quantity_filled = None,
+                average_fill_price = None,
+                credit = 0,
+                debit = 0,
+                commission = 0,
+                # order info
+                strategy_id = None,
+                broker = None,
+                broker_order_id = None,
+                submitted_at = None,
+                memo = None,
+                asset_class = None
+            ):
 
             super().__init__(
                 event_type = c.ORDER,
@@ -385,6 +357,7 @@ class OrderEvent:
                     (c.ASSET_CLASS, asset_class)]:
                 if val is not None:
                     order[name] = val
+
             super().__init__(
                 order = order,
                 event_ts = event_ts or pd.Timestamp.now(),
@@ -471,7 +444,7 @@ class OrderEvent:
 
             super().__init__(
                 event_subtype = event_subtype,
-                order_type = c.LIMIT,
+                order_type = c.MARKET,
                 order_class = c.SIMPLE,
                 symbol = symbol,
                 event_ts = event_ts

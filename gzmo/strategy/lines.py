@@ -128,14 +128,14 @@ class Lines(dict):
                 self[line].append(data.get(line))
         else:
             # much slower, try to avoid intermediate inserts.
-            if len(self.index) > self.maxlen:
+            if len(self.index) >= (self.maxlen or len(self.index) + 1):
                 self.index.popleft()
                 for line in self.tracked:
                     line.popleft()
             insert_position = bisect.bisect_right(self.index, data_idx)
             self.index.insert(insert_position, data_idx)
             for line in self.tracked:
-                self[line].insert(data.get(line))
+                self[line].insert(data.get(line), data_idx)
         return
 
     def get_slice(self, beg = None, end = None, iloc = False, as_df = False):

@@ -226,6 +226,8 @@ class Session:
 
         # clear proxies
         self._proxy_threads = {}
+        # default broker if none specified in order
+        default_broker = next(iter(self.brokers.keys()))
 
         if use_zmq:
             datafeed_proxy = zmq_datafeed_proxy(
@@ -238,7 +240,8 @@ class Session:
                 self._broker_broker_address,
                 self._broker_strategy_address,
                 self._broker_capture_address,
-                self.zmq_context
+                self.zmq_context,
+                default_broker
             )
             communication_proxy = zmq_communication_proxy(
                 self._communication_address,
@@ -248,24 +251,21 @@ class Session:
         
         else:
             datafeed_proxy = DatafeedProxyEmulator()
-            broker_proxy = BrokerProxyEmulator()
+            broker_proxy = BrokerProxyEmulator(default_broker = default_broker)
             communication_proxy = CommunicationProxyEmulator()
 
         self._proxies[c.DATA] = datafeed_proxy
         self._proxies[c.BROKER] = broker_proxy
         self._proxies[c.COMMUNICATION] = communication_proxy
 
-        # start the proxies if we're not syncing
-        if not synced:
-            self._proxy_threads[c.DATA] = threading.Thread(name = 'data_proxy_thread', target = datafeed_proxy.run, args = (self._main_shutdown_flag,), daemon = True)
-            self._proxy_threads[c.BROKER] = threading.Thread(name = 'broker_proxy_thread', target = broker_proxy.run, args = (self._main_shutdown_flag,), daemon = True)
-            self._proxy_threads[c.COMMUNICATION] = threading.Thread(name = 'communication_proxy_thread', target = communication_proxy.run, args = (self._main_shutdown_flag,), daemon = True)
+        # start the proxies
+        self._proxy_threads[c.DATA] = threading.Thread(name = 'data_proxy_thread', target = datafeed_proxy.run, args = (self._main_shutdown_flag,), daemon = True)
+        self._proxy_threads[c.BROKER] = threading.Thread(name = 'broker_proxy_thread', target = broker_proxy.run, args = (self._main_shutdown_flag,), daemon = True)
+        self._proxy_threads[c.COMMUNICATION] = threading.Thread(name = 'communication_proxy_thread', target = communication_proxy.run, args = (self._main_shutdown_flag,), daemon = True)
 
-            # Start the proxies
-            for proxy_thread in self._proxy_threads.values():
-                proxy_thread.start()
-        else:
-            pass
+        # Start the proxies
+        for proxy_thread in self._proxy_threads.values():
+            proxy_thread.start()
             
         return
 
@@ -320,18 +320,8 @@ class Session:
         return
 
     def _setup_brokers(self, use_zmq, synced):
-        """Sets up brokers for the different socket_modes.
-
-        If socket_mode is ALL, the brokers will connect to an order socket and/or
-            a datasocket.
-        If socket_mode is STRATEGIES_FULL, the session will set up a "broker socket"
-            for strategies to connect to, but the brokers will not be connecting
-            to a socket.
-        If socket_mode is STRATEGIES_INTERNALONLY or NONE, events are handled by
-            directly calling the brokers' methods, so no sockets are needed.
-        """
+        """Sets up brokers for the different socket_modes."""
         for name, broker in self.brokers.items():
-            
             # set up connections
             if use_zmq:
                 broker.zmq_context = self.zmq_context
@@ -341,11 +331,10 @@ class Session:
                 broker.data_socket = self._proxies[c.DATA].add_subscriber(name, '')
                 broker.order_socket = self._proxies[c.BROKER].add_party(name)    # returns socket
             
-            # start threads if not syncing
-            if not synced:
-                broker_thread = threading.Thread(name = f'broker_thread_name', target = broker.run, args = (self._main_shutdown_flag,), daemon = True)
-                self._broker_threads[name] = broker_thread
-                broker_thread.start()
+            # start threads
+            broker_thread = threading.Thread(name = f'broker_thread_name', target = broker.run, args = (self._main_shutdown_flag,), daemon = True)
+            self._broker_threads[name] = broker_thread
+            broker_thread.start()
 
         return
 
@@ -411,36 +400,49 @@ class Session:
     def next(self):
         """Iterates one cycle of the main event loop
 
-        The event loop is as follows:
-            - clear communications queues
-            - clear order queues
-            - 
-            - broker handle orders from strategies; send any response
-            - get data
-            - send data
-            - broker handle data; send any response
+            The event loops has strategies and broker process events,
+            and proxies relay messages, until an iteration where all
+            entities have no activities.
         """
 
-        # flag to keep track of activities
-        had_data = False
+        # Set to True if there is either data or activities from strategies/brokers
+        had_activity = False
+
         # Assume starting with all clear queues: no unhandled data, orders, or communications
         # First get the next data event
         if (data := self._synced_datafeed.fetch()) is not None:
-            had_data = True
+            had_activity = True
             topic = data[c.TOPIC]
             self._proxies[c.DATA].sockets_publisher['synced_feed'].send_multipart([topic.encode(), utils.packb(data)])
-            # Pass down the data
+            # Broadcast the data
             self._proxies[c.DATA].clear_queues()
-            # At this point, brokers will have tried to fill orders with the data/cached the data,
-            #   and strategies will have processed the data event and placed any orders
-            # Allow strategies to pass on any communications/orders
-            self._proxies[c.COMMUNICATION].clear_queues()
-            # pass any orders to the broker
-            self._proxies[c.BROKER].clear_queues()
-            # If there are any responses, the parents will want to tell their children
-            self._proxies[c.COMMUNICATION].clear_queues()
+        
+        # clear all activities form strategies and brokers
+        while True:
+            has_activity = False
 
-        return had_data
+            # Strategies handle data (place orders, etc)
+            for strategy in self.strategies.values():
+                has_activity |= strategy.next()
+            
+            # Communication proxy relays messages
+            has_activity |= self._proxies[c.COMMUNICATION].clear_queues()
+            
+            # Broker proxy relays orders
+            has_activity |= self._proxies[c.BROKER].clear_queues()
+
+            # Broker handle data/orders (place orders by strategies, fill orders using data, etc)
+            for broker in self.brokers.values():
+                has_activity |= broker.next()
+            
+            # set flag if there was any activities
+            had_activity |= has_activity
+
+            # had a full round of no activities, we can release the loop
+            if not has_activity:
+                break
+
+        return had_activity
 
     def _stop(self, linger = 0.1):
         """Exits gracefully."""
@@ -453,9 +455,6 @@ class Session:
         # wait for the strategies to exit clean
         for strategy_thread in self._strategy_threads.values():
             strategy_thread.join()
-
-
-
 
 class zmq_datafeed_proxy:
     """Relays messages from backend (datafeed producers) to frontend (strategies).
@@ -730,14 +729,14 @@ class DatafeedProxyEmulator:
         return self.sockets_subscriber[ident]
     
     def clear_queues(self):
-        """Relays the next item from each datafeed."""
+        """Move next items from deq_in from all sockets to deq_out to any subscribing sockets."""
         for datafeed in self.sockets_publisher.values():
             if datafeed.deq_in:
                 topic_encoded, data_packed = datafeed.deq_in.popleft()
                 topic_decoded, data_unpacked = topic_encoded.decode(), utils.unpackb(data_packed)
                 # send this data event to each strategies that subscribes to this topic
                 for strategy, subscriptions in self.subscriptions.items():
-                    if topic_decoded in subscriptions:
+                    if (topic_decoded in subscriptions) or ('' in subscriptions):
                         self.sockets_subscriber[strategy].deq_out.append([topic_encoded, data_packed])
                 return True
 
@@ -814,7 +813,7 @@ class BrokerProxyEmulator:
                         self.sockets[broker].deq_out.append(utils.packb(order_unpacked))
                     else:
                         strategy = order_unpacked[c.STRATEGY_CHAIN][-1]
-                        self.sockets[strategy].send(order_packed)
+                        self.sockets[strategy].deq_out.append(order_packed)
                     # there was an event. Reset the flag.
                     has_activities = True
                     had_activities = True
