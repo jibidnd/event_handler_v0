@@ -530,6 +530,9 @@ class zmq_datafeed_proxy:
 
     def _start(self, session_shutdown_flag = None):
 
+        if not self.is_setup:
+            self.setup()
+
         if session_shutdown_flag is None:
             session_shutdown_flag = self._shutdown_flag
             session_shutdown_flag.clear()
