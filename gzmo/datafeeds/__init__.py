@@ -25,9 +25,9 @@ class BaseDataFeed(abc.ABC):
             topic (str): The topic the datafeed will be published under (in a PUB socket).
             zmq_context (ZMQ Context): ZMQ context instance for publishing.
             from_beginning (bool): Indicates whether to re-execute the query.
-            start_sync (threading.Event): can be used to sync starting times between multiple datafeeds.
-                To use it, simply assign `datafeed.start_sync` to a common threading.Event() instance,
-                start all the datafeeds, and `set` the threading.Event() instance.
+            _start_barrier (threading.Barrier): can be used to sync starting times between multiple datafeeds.
+                To use it, simply assign `datafeed._start_barrier` to a threading.Barrier instance,
+                with the number of parties as the number of entities to wait for to start publishing.
             shutdown_flag (threading.Event): If threading is used, this event can be set to signal the datafeed to shut down.
         
         Methods:
@@ -48,7 +48,7 @@ class BaseDataFeed(abc.ABC):
         self.query = query
         self.zmq_context = zmq_context or zmq.Context.instance()
         self.from_beginning = True
-        self.start_sync = threading.Event(); self.start_sync.set()  # default to not block for a sync
+        self._start_barrier = threading.Barrier(1)  # default to not wait for anyone else to start publishing
         self.is_finished = False
         self._shutdown_flag = threading.Event()
         self.publishing_socket = None
@@ -103,7 +103,7 @@ class BaseDataFeed(abc.ABC):
             The queried data will be published to the socket, record by record, until
             all records have been published.
 
-            When called, it will wait for the `start_sync` flag to be set, if not already.
+            When called, it will wait for the `_start_barrier` barrier to be passed, if not already.
             Then, it will fetch one record at a time from the connector cursor, and publish
             the record under the `topic` of the datafeed. The record will be packed as a
             msgpack message.
@@ -118,7 +118,7 @@ class BaseDataFeed(abc.ABC):
             self.execute_query()
         
         # wait for the starting signal
-        self.start_sync.wait()
+        self._start_barrier.wait()
 
         # Keep going?
         while (not session_shutdown_flag.is_set()) and \

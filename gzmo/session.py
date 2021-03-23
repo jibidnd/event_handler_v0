@@ -92,11 +92,14 @@ class Session:
             >>> sesh.run()
     """
 
-    def __init__(self):
+    def __init__(self, use_zmq = False, synced = True):
         """Inits the session instance.
         
         Strategies, datafeeds, and brokers can be added via the `add_...` methods.
         """
+
+        self.use_zmq = use_zmq
+        self.synced = synced
 
         # Use one context for all communication (thread safe)
         self._zmq_context = zmq.Context()
@@ -112,7 +115,7 @@ class Session:
         self._synced_datafeed = None
         # self._data_subscriber_socket = None
 
-        self._datafeed_start_sync = threading.Event()
+        self._datafeed_start_barrier = None
         self._datafeed_publisher_address = None      # datafeeds publish to this address
         self._datafeed_subscriber_address = None     # strategies subscribe to this address for datafeeds
         self._datafeed_capture_address = None        # not implemented
@@ -136,6 +139,8 @@ class Session:
         
         # main shutdown flag
         self._main_shutdown_flag = threading.Event()
+        
+        self.is_setup = False
 
     def add_strategy(self, name, strategy):
         """Adds a strategy to the session.
@@ -151,26 +156,29 @@ class Session:
         """Adds a broker to the session."""
         self.brokers[broker.name] = broker
     
-    def run(self, use_zmq = False, synced = True):
+    def run(self):
         """Sets up infrastructure and runs the strategies.
         
         See __init__ docstring for different session modes
         """
 
-        if use_zmq:
+        if self.use_zmq:
             assert not synced, 'Cannot use ZMQ in non-synced mode.'
         
-        self._before_start(use_zmq, synced)
+        self.setup()
 
-        self._start(synced)
+        self._start()
 
         # exit gracefully
         self._stop()
 
         return
     
-    def _before_start(self, use_zmq, synced):
+    def setup(self, use_zmq = None, synced = None):
         """Sets up things."""
+
+        use_zmq = use_zmq or self.use_zmq
+        synced = synced or self.synced
 
         self._setup_addresses(use_zmq)
 
@@ -181,6 +189,8 @@ class Session:
         self._setup_brokers(use_zmq, synced)
 
         self._setup_strategies(use_zmq, synced)
+
+        self.is_setup = True
 
     def _setup_addresses(self, use_zmq):
         """Obtains free tcp addresses for setting up sockets."""
@@ -276,8 +286,9 @@ class Session:
         
         If not `synced`, all datafeeds are set to publish to an address in an
             unsynced manner. Datafeeds are started when this method is called,
-            but a start_sync flag is in place so that the datafeeds do not start publishing
-            until the flag is set (in self.start).
+            but a threading.Barrier is in place so that the datafeeds do not start publishing
+            until the the barrier is passed (in self.start).
+
             Datafeeds will emit data as soon as the data is available, without regards to
             whether the brokers/strategies are done processing prior data.
 
@@ -285,10 +296,13 @@ class Session:
             DatafeedSynchronizer, and data events will be `fetch`ed from the synced datafeed.
         
         """
+        # need all datafeeds + the session to be ready
+        self._datafeed_start_barrier = threading.Barrier(len(self.datafeeds) + 1)
+
         for name, datafeed in self.datafeeds.items():
             
             # datafeed will wait for a signcal to all start together
-            datafeed.start_sync = self._datafeed_start_sync
+            datafeed._start_barrier = self._datafeed_start_barrier
             
             # set up connections
             if use_zmq:
@@ -298,7 +312,7 @@ class Session:
                 datafeed.publishing_socket = self._proxies[c.DATA].add_publisher(name)
 
             # Start the datafeed if not syncing
-            # Publishing will be blocked until _datafeed_start_sync is set.
+            # Publishing will be blocked until _datafeed_start_barrier is passed.
             if not synced:
                 datafeed_thread = threading.Thread(name = f'datafeed_thread_{name}', target = datafeed._start, daemon = True)
                 self._datafeed_threads[name] = datafeed_thread
@@ -331,10 +345,11 @@ class Session:
                 broker.data_socket = self._proxies[c.DATA].add_subscriber(name, '')
                 broker.order_socket = self._proxies[c.BROKER].add_party(name)    # returns socket
             
-            # start threads
-            broker_thread = threading.Thread(name = f'broker_thread_name', target = broker.run, args = (self._main_shutdown_flag,), daemon = True)
-            self._broker_threads[name] = broker_thread
-            broker_thread.start()
+            if not synced:
+                # start threads
+                broker_thread = threading.Thread(name = f'broker_thread_name', target = broker.run, args = (self._main_shutdown_flag,), daemon = True)
+                self._broker_threads[name] = broker_thread
+                broker_thread.start()
 
         return
 
@@ -367,21 +382,29 @@ class Session:
                 strategy.communication_socket = self._proxies[c.COMMUNICATION].add_party(
                     strategy.strategy_id)
             
-            # start running the strategies so they are ready to receive data
-            strategy_thread = threading.Thread(name = f'strategy_thread_{name}', target = strategy.run, args = (self._main_shutdown_flag,), daemon = True)
-            self._strategy_threads[name] = strategy_thread
-            # tell the threads to start listening
-            strategy_thread.start()
+            if not synced:
+                # start running the strategies so they are ready to receive data
+                strategy_thread = threading.Thread(name = f'strategy_thread_{name}', target = strategy.run, args = (self._main_shutdown_flag,), daemon = True)
+                self._strategy_threads[name] = strategy_thread
+                # tell the threads to start listening
+                strategy_thread.start()
+            else:
+                strategy._before_start()
+        
+        # allow _before_start communication to go through if syncing
+        if synced:
+            self._proxies[c.COMMUNICATION].clear_queues()
 
         return
 
-    def _start(self, synced):
+    def _start(self):
         """Starts the session."""
 
-        if not synced:
-            # simply tell datafeeds to start publishing
+        if not self.synced:
+            # all data feeds will start publishing together when the barrier is passed by everyone
+            # Usually this should be the last barrier to pass
             # proxies, brokers, and strategies are all already running
-            self._datafeed_start_sync.set()
+            self._datafeed_start_barrier.wait()
             # wait for datafeeds to finishfor data_thread in self._datafeed_threads:
             for datafeed_thread in self._datafeed_threads:
                 datafeed_thread.join()
@@ -390,12 +413,8 @@ class Session:
                 had_activity = self.next()
                 if not had_activity:
                     break
-        
-        self._main_shutdown_flag.set()
+
         return
-    
-    # def start(self):
-    #     self._start()
 
     def next(self):
         """Iterates one cycle of the main event loop
@@ -404,6 +423,9 @@ class Session:
             and proxies relay messages, until an iteration where all
             entities have no activities.
         """
+
+        if not self.is_setup:
+            self.setup()
 
         # Set to True if there is either data or activities from strategies/brokers
         had_activity = False
@@ -451,10 +473,20 @@ class Session:
         # wait a second before terminating the context
         time.sleep(linger)
         self._zmq_context.destroy()
-
-        # wait for the strategies to exit clean
-        for strategy_thread in self._strategy_threads.values():
-            strategy_thread.join()
+        
+        if not self.synced:
+            # wait for the strategies to exit clean
+            for strategy_thread in self._strategy_threads.values():
+                # _before_stop() and _stop() are called after shutdown flag is set
+                strategy_thread.join()
+        else:
+            for strategy in self.strategies.values():
+                strategy._before_stop()
+                strategy._stop()
+    
+    def stop(self):
+        self._stop()
+        
 
 class zmq_datafeed_proxy:
     """Relays messages from backend (datafeed producers) to frontend (strategies).

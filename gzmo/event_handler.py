@@ -60,12 +60,9 @@ class EventHandler(abc.ABC):
 
     def run(self, session_shutdown_flag = None):
         self._before_start()
-        self.before_start()
-        self._start(session_shutdown_flag = session_shutdown_flag)
+        self._start(session_shutdown_flag = session_shutdown_flag) # calls `next`
         self._before_stop()
-        self.before_stop()
         self._stop()
-        self.stop()
         
     # -------------------------------------------------------------------
 
@@ -74,7 +71,8 @@ class EventHandler(abc.ABC):
 
         Called before `before_start`.
         """
-        pass
+        self.before_start()
+        return
     
     def before_start(self):
         """To be overriden for user-defined actions prior to starting.
@@ -150,6 +148,8 @@ class EventHandler(abc.ABC):
 
         Called before `before_stop`.
         """
+        self.before_stop()
+        return
 
     def before_stop(self):
         """To be overriden for user-defined actions prior to exiting.
@@ -163,6 +163,8 @@ class EventHandler(abc.ABC):
 
         Called before `stop`.
         """
+        self.stop()
+        return
 
     def stop(self):
         """To be overriden for user-defined actions after exiting.

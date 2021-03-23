@@ -371,7 +371,7 @@ class Strategy(event_handler.EventHandler):
     # ----------------------------------------------------------------------------------------------------
     def _before_start(self):
         # placeholder
-        pass
+        super()._before_start()
 
     def _start(self, session_shutdown_flag = None, pause = 1):
         """Main event loop to handle events from sockets.
@@ -411,7 +411,7 @@ class Strategy(event_handler.EventHandler):
                 time.sleep(pause)
 
     def _before_stop(self):
-        pass
+        super()._before_stop()
 
     def _stop(self):
         """Exits clean.
@@ -650,8 +650,11 @@ class Strategy(event_handler.EventHandler):
         if identifier is None:
             for position in filter(lambda x: ~x.is_closed, self.positions.values()):
                 if position.asset_class != c.STRATEGY:
-                    if position.quantity_open != 0:
-                        nav += self.get_mark(position.symbol) * position.quantity_open
+                    if position.asset_class == c.CASH:
+                        mark = decimal.Decimal('1.0')
+                    else:
+                        mark = self.get_mark(position.symbol)
+                    nav +=  mark * position.quantity_open
 
         else:
             # otherwise the identifier is one of two things:
@@ -660,8 +663,11 @@ class Strategy(event_handler.EventHandler):
             # if it is a non-strategy asset, sum up the values of all positions under the specified symbol.
             for position in filter(lambda x: ~x.is_closed, self.positions.values()):
                 if (position.owner == identifier) or ((position.symbol == identifier) and (position.asset_class != c.STRATEGY)): # ??
-                    if position.quantity_open != 0:
-                        nav += self.get_mark(position.symbol) * position.quantity_open
+                    if position.asset_class == c.CASH:
+                        mark = decimal.Decimal('1.0')
+                    else:
+                        mark = self.get_mark(position.symbol)
+                    nav +=  mark * position.quantity_open
         return nav
 
     def get_ncf(self, identifier = None):
@@ -1223,11 +1229,11 @@ class Strategy(event_handler.EventHandler):
                     quantities = quantities.reindex(marks.index)
                 eq_curve = quantities * marks
 
-                name = f'{pos.owner.replace(self.strategy_id, self.name)}_{pos.symbol}_{pos.position_id}'
+                name = f'{pos.owner.replace(self.strategy_id, self.name)}||||{pos.symbol}||||{pos.position_id}'
                 eq_curves[name] = eq_curve
-
+        
+        df_eq_curves = pd.DataFrame(eq_curves)
         if agg is None:
-            df_eq_curves = pd.DataFrame(eq_curves)
             if use_float:
                 df_eq_curves = df_eq_curves.astype(float)
             return df_eq_curves
@@ -1238,13 +1244,15 @@ class Strategy(event_handler.EventHandler):
                 n = 1
             else:
                 raise NotImplementedError(f'Aggregation type {agg} not implemented.')
+
             # aggregate by owner/symbol
-            agg_eq_curves = collections.defaultdict(int)
+            agg_eq_curves = collections.defaultdict(pd.DataFrame)
             for name, eq_curve in eq_curves.items():
-                agg_key = name.split('_')[n]
-                agg_eq_curves[agg_key] += eq_curve
+                agg_key = name.split('||||')[n]
+                agg_eq_curves[agg_key] = pd.concat([agg_eq_curves[agg_key], eq_curve], axis = 1).fillna(method = 'ffill')
+
             # construct dataframe and return
-            df_eq_curves = pd.DataFrame(agg_eq_curves)
+            df_eq_curves = pd.DataFrame({k: v.sum(axis = 1) for k, v in agg_eq_curves.items()})
             if use_float:
                 df_eq_curves = df_eq_curves.astype(float)
             return df_eq_curves
