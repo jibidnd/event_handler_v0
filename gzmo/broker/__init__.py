@@ -73,6 +73,8 @@ class BaseBroker(event_handler.EventHandler, abc.ABC):
         
         self._shutdown_flag = threading.Event()
 
+        self.open_orders = {}                   # better to refer to orders by id so we can refer to the same order even if attributes change
+
         # clock to keep track of time
         # self.clock = Decimal(0.00)
     
@@ -149,12 +151,12 @@ class BaseBroker(event_handler.EventHandler, abc.ABC):
     # Event handling
     # ----------------------------------------------------------------------------------------
  
-    # @abc.abstractmethod
+    @abc.abstractmethod
     def format_order_out(self, order):
         """Format order for external connections (e.g. to an actual broker)."""
         return order
     
-    # @abc.abstractmethod
+    @abc.abstractmethod
     def format_order_in(self, order):
         """Format order for internal consumption (e.g. for strategies)."""
         return order
@@ -185,6 +187,8 @@ class BaseBroker(event_handler.EventHandler, abc.ABC):
 
             if not self.next():
                 time.sleep(pause)
+        
+        self._stop()
     
 
     def _process_order(self, order):
@@ -199,10 +203,19 @@ class BaseBroker(event_handler.EventHandler, abc.ABC):
 
         # if this is an order request from a strategy
         if order_internal[c.EVENT_SUBTYPE] == c.REQUESTED:
+            self.open_orders[order_internal[c.ORDER_ID]] = order_internal
             if (response := self._place_order(order_external)) is not None:
                 self._handle_event(response)
-        # otherwise it's a response from the broker. Send it to the strategy
+        # otherwise it's a response from the broker.
+        # Get/update the corresponding order and send it to the strategy
         else:
+            # find the order
+            if (original_order := self.open_orders.pop(order_internal[c.ORDER_ID], None)) is not None:
+                order_internal = {**original_order, **order_internal}
+                # if order is not resolved, put it back in open orders
+                if order_internal[c.EVENT_SUBTYPE] in [c.SUBMITTED, c.RECEIVED, c.PARTIALLY_FILLED]:
+                    self.open_orders[order_internal[c.ORDER_ID]] = order_internal
+
             if (self.order_socket is not None):
                 self.order_socket.send(utils.packb(order_internal))
         
@@ -210,12 +223,8 @@ class BaseBroker(event_handler.EventHandler, abc.ABC):
         return
 
     def _stop(self):
-        """Set the shutdown flag and close the sockets.
-        """        
-        self._shutdown_flag.set()
-        for socket in [self.data_socket, self.order_socket, self.logging_socket]:
-            socket.close(linger = 10)
-
+        self.stop()
+        pass
 
 
 class OrderEvent:
@@ -255,7 +264,7 @@ class OrderEvent:
                 debit = 0,
                 commission = 0,
                 # order info
-                strategy_id = None,
+                owner = None,
                 broker = None,
                 broker_order_id = None,
                 submitted_at = None,
@@ -289,7 +298,7 @@ class OrderEvent:
                 (debit, c.DEBIT),
                 (commission, c.COMMISSION),
                 # order info
-                (strategy_id, c.STRATEGY_ID),
+                (owner, c.OWNER),
                 (broker, c.BROKER),
                 (order_id, c.ORDER_ID),
                 (broker_order_id, c.BROKER_ORDER_ID),

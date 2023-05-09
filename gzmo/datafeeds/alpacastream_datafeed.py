@@ -2,6 +2,8 @@ import websocket
 import json
 from collections import defaultdict, deque
 import time
+import threading
+import itertools
 
 import pandas as pd # for parsing RFC-3330 timestamps and preserve nanoseocnds
 
@@ -29,7 +31,7 @@ class AlpacaStreamDataFeed(BaseDataFeed):
         self.data_type = self.query[c.DATA_TYPE]
 
         # auth
-        self.auth = self.auth['alpaca_live']
+        self.auth = self.auth['alpaca_paper']
 
         # set up the request
         # format the query
@@ -71,8 +73,12 @@ class AlpacaStreamDataFeed(BaseDataFeed):
         
         return
 
-    def execute_query(self, live = False):
-        """Makes the connection and get ready to emit data."""
+    def execute_query(self):
+        """Makes the connection and get ready to emit data.
+        
+        This function starts the streaming and cache some results in `self.results`.
+        When the `self.fetch` is called, the cached results will be returned.
+        """
 
         auth_msg = {
             'action': 'auth',
@@ -85,10 +91,12 @@ class AlpacaStreamDataFeed(BaseDataFeed):
         self.ws = websocket.WebSocketApp(
             socket,
             on_open = lambda ws: self.on_open(ws, auth_msg),
-            on_message = print#self.on_message
+            on_message = lambda ws, messages: self.on_message(ws, messages)
         )
         
         self.from_beginning = False
+        thread = threading.Thread(name = f'{self.topic}_ws', target = self.ws.run_forever, daemon = True)
+        thread.start()
         return
     
     def on_open(self, ws, auth_msg):
@@ -97,40 +105,46 @@ class AlpacaStreamDataFeed(BaseDataFeed):
         return
 
 
-    def on_message(self, ws, message):
+    def on_message(self, ws, messages):
+        messages = json.loads(messages)
+        for message in messages:
+            # format the message
+            message = self.format_result(message)
+            # append the message to results for fetching later
+            if message is not None:
+                self.results.append(message)
         
-        # format the message
-        message = self.format_results(message)
-
-        # append the message to results for fetching later
-        self.results.append(message)
-        
-        # publish the message if there is a socket
-        if self.sock_out is not None:
-            try:
-                # send the event with a topic
-                res_packed = utils.packb(message)
-                self.sock_out.send_multipart([self.topic.encode(), res_packed], flag = zmq.NOBLOCK)
-            except zmq.ZMQError as exc:
-                # Drop messages if queue is full
-                if exc.errno == zmq.EAGAIN:
-                    pass
-                else:
-                    # unexpected error: shutdown and raise
-                    self.shutdown()
-                    raise
-            except zmq.ContextTerminated:
-                # context is being closed by session
-                self.shutdown()
-            except:
-                raise
+        # # publish the message if there is a socket
+        # if self.sock_out is not None:
+        #     try:
+        #         # send the event with a topic
+        #         res_packed = utils.packb(message)
+        #         self.sock_out.send_multipart([self.topic.encode(), res_packed], flag = zmq.NOBLOCK)
+        #     except zmq.ZMQError as exc:
+        #         # Drop messages if queue is full
+        #         if exc.errno == zmq.EAGAIN:
+        #             pass
+        #         else:
+        #             # unexpected error: shutdown and raise
+        #             self.shutdown()
+        #             raise
+        #     except zmq.ContextTerminated:
+        #         # context is being closed by session
+        #         self.shutdown()
+        #     except:
+        #         raise
     
-    @staticmethod
-    def format_result(result):
-        
+    def _stop(self):
+        """Overrides parent method to close websocket."""
+        super()._stop()
+        self.ws.close()
+    
+    # @staticmethod
+    def format_result(self, result):
         _result = {**result}
         # this is a data event
         _result[c.EVENT_TYPE] = c.DATA
+        _result[c.TOPIC] = self.topic
         # bar/quote/tick
         if (message_type := _result.pop('T')) == 'b':
             # bars
@@ -141,7 +155,7 @@ class AlpacaStreamDataFeed(BaseDataFeed):
             _result[c.LOW] = _result.pop('l')
             _result[c.CLOSE] = _result.pop('c')
             _result[c.VOLUME] = _result.pop('v')
-            _result[c.EVENT_TS] = pd.Timestamp(_result.pop('t')).isoformat()
+            _result[c.EVENT_TS] = pd.Timestamp(_result.pop('t'))
         elif message_type == 'q':
             # quotes
             _result[c.EVENT_SUBTYPE] = c.QUOTE
@@ -152,7 +166,7 @@ class AlpacaStreamDataFeed(BaseDataFeed):
             _result[c.BID_EXCHANGE] = _result.pop('bx')
             _result[c.BID_PRICE] = _result.pop('bp')
             _result[c.BID_SIZE] = _result.pop('bs')
-            _result[c.EVENT_TS] = pd.Timestamp(_result.pop('t')).isoformat()
+            _result[c.EVENT_TS] = pd.Timestamp(_result.pop('t'))
             _result[c.CONDITIONS] = _result.pop('c')
             _result[c.TAPE] = _result.pop('z')
         elif message_type == 't':
@@ -163,12 +177,13 @@ class AlpacaStreamDataFeed(BaseDataFeed):
             _result[c.EXCHANGE] = _result.pop('x')
             _result[c.PRICE] = _result.pop('p')
             _result[c.SIZE] = _result.pop('s')
-            _result[c.EVENT_TS] = pd.Timestamp(_result.pop('t')).isoformat()
+            _result[c.EVENT_TS] = pd.Timestamp(_result.pop('t'))
             _result[c.CONDITIONS] = _result.pop('c')
             _result[c.TAPE] = _result.pop('z')
         else:
-            pass
-        
+            # TODO: log unexpected message
+            print("non data item",  _result)
+            return None
         return _result
 
     def fetch(self, limit = 1):
@@ -195,25 +210,26 @@ class AlpacaStreamDataFeed(BaseDataFeed):
             self.execute_query()
 
         res = []
-
         if limit is None:
             res.extend(list(self.results))
             return res
         else:
             while len(res) < limit:
                 if len(self.results) == 0:
+                    # wait a little bit to see if we can gather more data
                     time.sleep(0.1)
-                    continue
                 else:
                     if len(self.results) > (n_needed := (limit - len(res))):
-                        res.extend(list(self.results)[:n_needed])
-                        self.results = self.results[n_needed:]
+                        res.extend(itertools.islice(self.results, None, n_needed))
+                        self.results = deque(itertools.islice(self.results, n_needed + 1, None))
                     elif 0 < len(self.results) <= n_needed:
                         # add what we have
-                        res.extend(list(self.results))
-
+                        res.extend(self.results)
+                        # remove from results
+                        self.results = deque()
             # return a list only if limit > 1
             if limit > 1:
                 return res
             elif limit == 1:
                 return res[0]
+        

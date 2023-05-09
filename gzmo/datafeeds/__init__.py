@@ -3,6 +3,7 @@ import configparser
 import threading
 import abc
 import datetime
+import time
 
 import pytz
 import zmq
@@ -95,9 +96,11 @@ class BaseDataFeed(abc.ABC):
         pass
     
     def run(self, session_shutdown_flag = None, pause = 1):
-        return self._start(session_shutdown_flag = session_shutdown_flag, pause = pause)
+        self._start(session_shutdown_flag = session_shutdown_flag, pause = pause)
+        self._stop()
+        return
 
-    def _start(self, session_shutdown_flag = None, pause = 1):
+    def _start(self, session_shutdown_flag = None):
         """Publishes the queried data to the socket.
 
             The queried data will be published to the socket, record by record, until
@@ -119,48 +122,50 @@ class BaseDataFeed(abc.ABC):
         
         # wait for the starting signal
         self._start_barrier.wait()
+        if session_shutdown_flag is None:
+            session_shutdown_flag = threading.Event()
 
         # Keep going?
+        # For historical data, `fetch` should set `self.is_finished` = True when all data
+        #   is done so we will exit this loop
         while (not session_shutdown_flag.is_set()) and \
                 (not self._shutdown_flag.is_set()) and \
                 (not self.is_finished):
-            
-            # get one row of result everytime
-            # maybe slower but won't have to worry about size of results
+            if not self.next():
+                # pause if there is no data
+                time.sleep(0.01)
+
+        return
+
+    def next(self):
             if (res := self.fetch(limit = 1)) is not None:
                 try:
                     # send the event with a topic
                     res_packed = utils.packb(res)
-                    self.publishing_socket.send_multipart([self.topic.encode(), res_packed], flag = zmq.NOBLOCK)
+                    self.publishing_socket.send_multipart([self.topic.encode(), res_packed], flags = zmq.NOBLOCK)
                 except zmq.ZMQError as exc:
                     # Drop messages if queue is full
                     if exc.errno == zmq.EAGAIN:
                         pass
-                    else:
-                        # unexpected error: shutdown and raise
-                        self._stop()
-                        raise
-                except zmq.ContextTerminated:
-                    # context is being closed by session
-                    self._stop()
-                except:
-                    raise
+                return True
             else:
-                # no more results
-                self.is_finished = True
-                self._stop()
+                return False
+            #         elif exc.errorno == zmq.ContextTerminated:
+            #             # context is being closed by session
+            #             return False
+            #         else:
+            #             # unexpected error: shutdown and raise
+            #             raise
+            #     return True
+            # else:
+            #     return False
 
-                break
-        
-        # shut down gracefully
-        self._stop()
-
-        return
 
     def _stop(self):
         """Shuts down gracefully."""
         self._shutdown_flag.set()
-        self.publishing_socket.close(linger = 10)
+        if self.publishing_socket is not None:
+            self.publishing_socket.close(linger = 10)
 
 
 class DataFeedQuery:

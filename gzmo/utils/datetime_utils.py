@@ -99,10 +99,10 @@ def is_isoformat(str):
 
 def to_isoformat(dict_data, endswiths = None):
     dict_data = {**dict_data}
-    endswiths = endswiths or ['_at', '_timestamp', '_time', 'EVENT_TS']
+    endswiths = endswiths or ['_AT', '_TIMESTAMP', '_TIME', 'EVENT_TS']
     for key in dict_data.keys():
         for endswith in endswiths:
-            if key.endswith(endswith):
+            if key.upper().endswith(endswith):
                 try:
                     dict_data[key] = pd.Timestamp(dict_data[key]).isoformat()
                 except:

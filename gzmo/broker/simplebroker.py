@@ -49,7 +49,7 @@ class SimpleBroker(BaseBroker):
         """  
         super().__init__(name, zmq_context)
         self.fill_method = fill_method
-        self.open_orders = {}                   # better to refer to orders by id so we can refer to the same order even if attributes change
+        
         self.closed_orders = []
         self.data_cache = defaultdict(lambda: deque(maxlen = 1))    # to handle left- or center- aligned bars
         self.clock = pd.Timestamp(0.0)          # This is directly linked to the latest event's 
@@ -103,7 +103,12 @@ class SimpleBroker(BaseBroker):
         
         return
 
-
+    def format_order_out(self, _order):
+        return _order
+    
+    def format_order_in(self, order):
+        return order
+    
 
     def _place_order(self, order):
         """Handles an incoming order and respond with a "RECEIVED" order event.

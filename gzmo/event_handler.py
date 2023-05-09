@@ -10,8 +10,6 @@
 # However, it is not a python standard lib
 # Overall, I think that messagepack's speed advantage outweighs the human-readability part (we don't have to read the message on the wire, anyways)
 
-import datetime
-import uuid
 import abc
 
 import pandas as pd
@@ -32,8 +30,12 @@ class EventHandler(abc.ABC):
     reacts to data and order events, a Position is an event handler that updates attributes given
     order events, and a Broker is an event handler that responds to data and order events.
 
+    This base class is a template for classes to handle data, orders, and communication via
+    the corresponding sockets. Subclasses simply have to spcify the sockets to have events from
+    those sockets processed.
+
     The base class defines methods that are intended to be overridden.
-    Methods with an underscore prepended ("internal methods") are methods that are to be overridden
+    Methods with an underscore prepended ("internal methods") are methods that can be overridden
     by module classes that implements the base class.
     Methods without the underscore prepended ("external methods") are method that are to be overridden
     by the user to add additional custom behaviour.
@@ -56,34 +58,20 @@ class EventHandler(abc.ABC):
         self.logging_socket = None
         self.next_events = {}
     
-    # -------------------------------------------------------------------
+      
+    # --------------------------------------s-----------------------------
 
-    def run(self, session_shutdown_flag = None):
-        self._before_start()
-        self._start(session_shutdown_flag = session_shutdown_flag) # calls `next`
-        self._before_stop()
-        self._stop()
-        
-    # -------------------------------------------------------------------
+    def _setup(self):
+        pass
 
-    def _before_start(self):
-        """Class internal method for actions prior to starting.
-
-        Called before `before_start`.
-        """
-        self.before_start()
-        return
-    
-    def before_start(self):
-        """To be overriden for user-defined actions prior to starting.
-
-        e.g. passing cash, warm up data, etc.
-        Called after `_before_start`.
-        """
+    def setup(self):
         pass
     
     def _start(self):
         """Start the main event loop."""
+        pass
+    
+    def start(self):
         pass
     
     def _get_next_events(self):
@@ -142,28 +130,21 @@ class EventHandler(abc.ABC):
             had_activity = True
         
         return had_activity
-    
-    def _before_stop(self):
-        """Class internal method for actions prior to exiting.
-
-        Called before `before_stop`.
-        """
-        self.before_stop()
-        return
-
-    def before_stop(self):
-        """To be overriden for user-defined actions prior to exiting.
-
-        e.g. cancel open orders, etc
-        Called after `_before_stop`.
-        """
 
     def _stop(self):
         """Class internal method for actions when exiting.
 
+        Sets the shutdown floag and closes any open sockets.
         Called before `stop`.
         """
-        self.stop()
+
+        self._shutdown_flag.set()
+
+        # close sockets
+        for socket in [self.communication_socket, self.data_socket, self.order_socket, self.logging_socket]:
+            if ((socket is not None) and (~socket.closed)):
+                socket.close(linger = 10)
+
         return
 
     def stop(self):
@@ -172,6 +153,7 @@ class EventHandler(abc.ABC):
         e.g. return results, etc
         Called after `_stop`.
         """
+        pass
     # -------------------------------------------------------------------
 
     def _handle_event(self, event):
@@ -318,11 +300,13 @@ class Event(dict):
         Returns:
             deque: The requested element of the dict; a deque object.
         """
-        if key in self.keys():
-            return self[key]
-        elif (matching_keys := [k for k in self.keys() if k.lower() == key.lower()]) != []:
-            # 3 times slower, try to avoid this
-            _key = matching_keys[0]
-            return self[_key]
-        else:
-            raise KeyError(key)
+        try:
+            return super().__getattr__(key)
+        except:
+            raise
+            # if (matching_keys := [k for k in self.keys() if k.lower() == key.lower()]) != []:
+            #     # 3 times slower, try to avoid this
+            #     _key = matching_keys[0]
+            #     return self[_key]
+            # else:
+            #     raise KeyError(key)

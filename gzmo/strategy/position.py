@@ -106,8 +106,8 @@ class Position(event_handler.EventHandler):
             self.open_orders[order[c.ORDER_ID]] = order
         elif event_subtype == c.SUBMITTED:
             pass
-        elif event_subtype in [c.DENIED, c.FAILED, c.EXPIRED, c.CANCELLED, c.REJECTED]:
-            self.open_orders.pop(order_id, None)
+        elif event_subtype in [c.DENIED, c.FAILED, c.EXPIRED, c.CANCELLED, c.REJECTED, c.INVALID]:
+            self.open_orders.pop(order[c.ORDER_ID], None)
         # Process order events initiated on the broker's side
         elif event_subtype == c.RECEIVED:
             # order are assumed to be received when submitted
@@ -210,7 +210,7 @@ class CashPosition(Position):
         self.transactions.append(order)
         event_subtype = order[c.EVENT_SUBTYPE]
         iscashflow = order[c.ORDER_TYPE] == c.CASHFLOW
-        isfromhere = (order[c.STRATEGY_ID] == self.owner)
+        isfromhere = (order[c.OWNER] == self.owner)
         isforhere = (order[c.SYMBOL] == self.owner)
 
         # depending on order type this may or may not be exact
@@ -236,6 +236,10 @@ class CashPosition(Position):
             self.quantity_open += (credit - debit)
             self.credit += credit
             self.debit += debit
+
+            # update quantity history
+            self.quantity_history[0].append(order[c.EVENT_TS])
+            self.quantity_history[1].append(self.quantity_open)
             
             return self.process_order(order)
         
@@ -271,7 +275,7 @@ class CashPosition(Position):
                 self.quantity_history[0].append(order[c.EVENT_TS])
                 self.quantity_history[1].append(self.quantity_open)
                 
-            elif event_subtype in [c.FAILED, c.EXPIRED, c.CANCELLED, c.REJECTED]:
+            elif event_subtype in [c.FAILED, c.EXPIRED, c.CANCELLED, c.REJECTED, c.INVALID]:
                 self.quantity_pending -= pending_amount    # prior approx fill price
 
             return self.process_order(order)

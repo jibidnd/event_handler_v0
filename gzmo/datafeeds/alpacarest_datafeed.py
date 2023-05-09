@@ -1,5 +1,6 @@
 import requests
 import urllib.parse
+import decimal
 
 import pandas as pd
 
@@ -136,17 +137,22 @@ class AlpacaRestDataFeed(BaseDataFeed):
         
         # this is a data event
         _result[c.EVENT_TYPE] = c.DATA
+        _result[c.TOPIC] = self.topic
+        _result[c.SYMBOL] = self.query[c.SYMBOL]
 
         if event_subtype == c.BAR:
             # bars
             _result[c.EVENT_SUBTYPE] = c.BAR
-            _result[c.OPEN] = _result.pop('o')
-            _result[c.HIGH] = _result.pop('h')
-            _result[c.LOW] = _result.pop('l')
-            _result[c.CLOSE] = _result.pop('c')
-            _result[c.VOLUME] = _result.pop('v')
+            _result[c.OPEN] = decimal.Decimal(_result.pop('o'))
+            _result[c.HIGH] = decimal.Decimal(_result.pop('h'))
+            _result[c.LOW] = decimal.Decimal(_result.pop('l'))
+            _result[c.CLOSE] = decimal.Decimal(_result.pop('c'))
+            _result[c.VOLUME] = decimal.Decimal(_result.pop('v'))
+            _result[c.RESOLUTION] = self.query[c.RESOLUTION]
+            _result[c.MULTIPLIER] = self.query[c.MULTIPLIER]
+
             if self.query[c.ALIGNMENT] == c.LEFT:
-                _result[c.EVENT_TS] = pd.Timestamp(_result.pop('t')).isoformat()
+                _result[c.EVENT_TS] = pd.Timestamp(_result.pop('t'))    # packer will isoformat this
                 _result[c.ALIGNMENT] = c.LEFT
             elif self.query[c.ALIGNMENT] == c.RIGHT:
                 offset = pd.Timedelta(value = self.query[c.MULTIPLIER], unit = self.query[c.RESOLUTION])
@@ -167,7 +173,7 @@ class AlpacaRestDataFeed(BaseDataFeed):
             _result[c.BID_EXCHANGE] = _result.pop('bx')
             _result[c.BID_PRICE] = _result.pop('bp')
             _result[c.BID_SIZE] = _result.pop('bs')
-            _result[c.EVENT_TS] = pd.Timestamp(_result.pop('t')).isoformat()
+            _result[c.EVENT_TS] = pd.Timestamp(_result.pop('t'))    # packer will isoformat this
             _result[c.CONDITIONS] = _result.pop('c')
             _result[c.TAPE] = _result.pop('z')
         elif event_subtype == c.TICK:
@@ -177,7 +183,7 @@ class AlpacaRestDataFeed(BaseDataFeed):
             _result[c.EXCHANGE] = _result.pop('x')
             _result[c.PRICE] = _result.pop('p')
             _result[c.SIZE] = _result.pop('s')
-            _result[c.EVENT_TS] = pd.Timestamp(_result.pop('t')).isoformat()
+            _result[c.EVENT_TS] = pd.Timestamp(_result.pop('t'))    # packer will isoformat this
             _result[c.CONDITIONS] = _result.pop('c')
             _result[c.TAPE] = _result.pop('z')
         else:

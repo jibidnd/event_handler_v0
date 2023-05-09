@@ -5,6 +5,7 @@ import socket
 import datetime
 import warnings
 import decimal
+import logging
 
 import pandas as pd
 import pytz
@@ -85,12 +86,17 @@ def default_pre_packer(obj):
         obj: The object to be prepacked.
     """    
     if isinstance(obj, datetime.datetime):
-        # if (tzinfo := obj.tzinfo) is None:
-        #     obj = obj.astimezone(tz = None) # assumes system local timezone
-        #     warnings.warn('Naive datetime object passed. Assuming system local timezone.')
+        if (tzinfo := obj.tzinfo) is None:
+            obj = pd.Timestamp(obj).tz_localize('UTC')
+            warnings.warn('Naive datetime object passed. Assuming UTC time.')
         processed = msgpack.ExtType(5, msgpack.packb(obj.isoformat(), default = str))
     elif isinstance(obj, decimal.Decimal):
         processed = msgpack.ExtType(10, str(obj).encode('utf-8'))
+    elif isinstance(obj, logging.LogRecord):
+        # Issue #25685: delete 'message' if present: redundant with 'msg'
+        processed = obj.__dict__
+        processed.pop('message', None)
+        processed = msgpack.ExtType(15, msgpack.packb(processed))
     else:
         processed = obj
     return processed
@@ -111,6 +117,8 @@ def ext_hook(ext_type_code, data):
         return pd.Timestamp(msgpack.unpackb(data))
     elif ext_type_code == 10:
         return decimal.Decimal(data.decode('utf-8'))
+    elif ext_type_code == 15:
+        return logging.makeLogRecord(msgpack.unpackb(data))
     # otherwise let msgpack do the default handling of ext_types
     else:
         return msgpack.ExtType(ext_type_code, data)  
@@ -118,3 +126,16 @@ def ext_hook(ext_type_code, data):
 def unpackb(obj):
     """Convenient way to set the ext_hook in unapcking."""
     return msgpack.unpackb(obj, ext_hook = ext_hook)
+
+class ZMQHandler(logging.Handler):
+    def __init__(self, socket):
+        logging.Handler.__init__(self)
+        self.socket = socket
+
+    def emit(self, record):
+        record_packed = packb(record)
+        try:
+            self.socket.send_multipart([''.encode(), record_packed])
+            print('sent!')
+        except:
+            logging.getLogger().handle(record)

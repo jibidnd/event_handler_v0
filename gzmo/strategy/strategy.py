@@ -2,22 +2,23 @@
 
 import abc
 import collections
-from os import posix_fadvise
 import uuid
 import decimal
-from collections import deque
+from collections import deque, defaultdict
 import datetime
 import pytz
 import time
 import threading
 import copy
 import warnings
+import logging
 
 import pandas as pd
 
 import json
 
 import zmq
+from zmq.log.handlers import PUBHandler
 
 from .position import Position, CashPosition
 from .lines import Lines
@@ -64,7 +65,7 @@ class Strategy(event_handler.EventHandler):
         process_order
     """
     def __init__(self, name = None, zmq_context = None, communication_address = None,
-                    data_address = None, order_address = None, logging_addresses = None,
+                    data_address = None, order_address = None, logging_address = None,
                     data_subscriptions = None, params = None, rms = None, local_tz = 'America/New_York'):
         super().__init__()
         
@@ -74,7 +75,7 @@ class Strategy(event_handler.EventHandler):
         self.communication_address = communication_address
         self.data_address = data_address
         self.order_address = order_address
-        self.logging_addresses = logging_addresses
+        self.logging_address = logging_address
         self.local_tz = pytz.timezone(local_tz)
         self.params = params or dict()
         self.rms = rms or RMS()
@@ -92,11 +93,11 @@ class Strategy(event_handler.EventHandler):
         # self.closed_trades = {}             # trade_id: [position_ids]
         self.positions = {}                 # position_id: position object
         self.shares = None                  # if none specified, shares will be set to $invested when add_cash is called for the first time.
-        self.cash = CashPosition(owner = self.strategy_id); self.positions[self.cash.position_id] = self.cash
+        self.cash = CashPosition(owner = self.name); self.positions[self.cash.position_id] = self.cash
 
         # Keeping track of time: internally, time will be tracked as local time
         # For communication, (float) timestamps on the second resolution @ UTC will be used.
-        self.clock = pd.Timestamp(0)
+        self.clock = pd.Timestamp(0, tz = self.local_tz)
         self._shutdown_flag = threading.Event()
 
         # Connection things
@@ -106,10 +107,14 @@ class Strategy(event_handler.EventHandler):
             self.connect_data_socket(data_address)
         if self.order_address is not None:
             self.connect_order_socket(order_address)
-        if self.logging_addresses is not None:
-            for logging_address in logging_addresses:
-                self.connect_logging_socket(logging_address)
-
+        if self.logging_address is not None:
+            self.connect_logging_socket(logging_address)
+        
+        # logging
+        self.logger = logging.getLogger(f'strategy[{self.name}]')
+        self.logger.setLevel(logging.DEBUG)
+    def test(self):
+        self.logger.info('abc')
     def __str__(self):
         """Summary of the Strategy as string representation.
 
@@ -183,20 +188,18 @@ class Strategy(event_handler.EventHandler):
         self.order_socket.connect(order_address)
 
     def connect_logging_socket(self, logging_address):
-        """Connects a ZMQ DEALER socket to the specified `logging_address`.
+        """Connects a ZMQ PUB socket to the specified `logging_address`.
 
         Args:
             logging_address (str): A ZMQ address string in the form of 'protocol://interface:port’.
         """
-        # if new address, add it to the list
-        if logging_address not in self.logging_addresses:
-            self.logging_addresses.append(logging_address)
+        self.logging_address = logging_address
         # Create a logging socket if none exists yet
         if not self.logging_socket:
-            socket = self.zmq_context.socket(zmq.DEALER)
-            socket.setsockopt(zmq.IDENTITY, self.strategy_id.encode())
+            socket = self.zmq_context.socket(zmq.PUB)
             self.logging_socket = socket
         self.logging_socket.conenct(logging_address)
+        self.logger.addHandler(utils.ZMQHandler(self.logging_socket))
 
     def subscribe_to_data(self, topic, track = True, line_args = None, lazy = False):
         """Subscribe to a data topic published to the data socket.
@@ -296,13 +299,13 @@ class Strategy(event_handler.EventHandler):
         """
         if isinstance(child_strategy, self.__class__.__bases__):
             # Establish the relationship
-            child_strategy.add_parent(self.strategy_id) # all orders are not routed through the parent
+            child_strategy.add_parent(self.strategy_id) # all orders are now routed through the parent
             # Create the child positions
             child_strategy_id = child_strategy.strategy_id
             # Add a position for the child strategy
             self.create_position(symbol, asset_class = c.STRATEGY)
             self.children[symbol] = child_strategy_id
-            openpositionsummary = child_strategy.get_openpositionsummary()
+            openpositionsummary = child_strategy.get_openpositionsummary(ext = True)
             self.load_openpositions(openpositionsummary)
 
         elif isinstance(child_strategy, dict):
@@ -348,16 +351,17 @@ class Strategy(event_handler.EventHandler):
         nav_0 = self.get_nav()
 
         cash_order = OrderEvent.cash_order(
-            symbol = self.strategy_id,
+            symbol = self.name,
             notional = amount,
             event_ts = self.clock
         )
         # Need to flip credit and debit since OrderEvent.cash_order is initialized
         # to be external facing
         cash_order[c.CREDIT], cash_order[c.DEBIT] = cash_order[c.DEBIT], cash_order[c.CREDIT]
-        cash_order = self.prepare_order(cash_order)
+        _cash_order, _ = self.prepare_order(cash_order)
 
-        self.cash._handle_event(cash_order)
+        self.cash._handle_event(_cash_order)
+        
 
         # dilute shares so that the mark of the position is not changed by adding cash
         if self.shares is None:
@@ -369,11 +373,8 @@ class Strategy(event_handler.EventHandler):
     # ----------------------------------------------------------------------------------------------------
     # Session stuff
     # ----------------------------------------------------------------------------------------------------
-    def _before_start(self):
-        # placeholder
-        super()._before_start()
 
-    def _start(self, session_shutdown_flag = None, pause = 1):
+    def start(self, session_shutdown_flag = None, pause = 1):
         """Main event loop to handle events from sockets.
 
         The main event loop continuously checks for events from the communication, data,
@@ -382,7 +383,7 @@ class Strategy(event_handler.EventHandler):
         At any time, the strategy will have visibility of the next event from each socket:
         Data, order, communication; as stored in next_events.
         If any of these slots are empty, the strategy will make 1 attempt to receive data
-        from the corresponding socket.
+        from the socket.
 
         Then, the events in next_events will be sorted by event_ts, and the very next
         event will be handled.
@@ -390,9 +391,9 @@ class Strategy(event_handler.EventHandler):
         The logic then resets and loops forever.
 
         The logic is roughly as follow:
-            - Populate next communication event
-            - Populate next data event
-            - Populate next order event
+            - Populate next communication event if not already populated
+            - Populate next data event if not already populated
+            - Populate next order event if not already populated
             - Sort the next communication, data, and order events by EVENT_TS
             - Handle the earliest of the 3 events
             - Loop
@@ -405,29 +406,10 @@ class Strategy(event_handler.EventHandler):
             session_shutdown_flag.clear()
 
         while (not session_shutdown_flag.is_set()) and (not self._shutdown_flag.is_set()):
-            if not self.next():
+            if not self._next():
                 # so we don't take up too much resources when backtesting by
                 # going in an empty infinitely loop
                 time.sleep(pause)
-
-    def _before_stop(self):
-        super()._before_stop()
-
-    def _stop(self):
-        """Exits clean.
-
-        Sets the shutdown floag and closes any open sockets.
-        """
-        self._shutdown_flag.set()
-
-        time.sleep(1)
-
-        # close sockets
-        for socket in [self.communication_socket, self.data_socket, self.order_socket, self.logging_socket]:
-            if (isinstance(socket, zmq.sugar.socket.Socket)) and ((socket is not None) and (~socket.closed)):
-                socket.close(linger = 10)
-
-        return
 
     """
     ----------------------------------------------------------------------------------------------------
@@ -452,7 +434,9 @@ class Strategy(event_handler.EventHandler):
 
         # localize the event ts
         # event_ts should already be a pd.Timestamp object from unpacking
-        # event[c.EVENT_TS] = event[c.EVENT_TS].astimezone(self.local_tz)
+        # if no timezone information, assume already in local time
+        event[c.EVENT_TS] = event[c.EVENT_TS].tz_convert(self.local_tz)
+
         # event_ts = event[c.EVENT_TS]
         # if isinstance(event_ts, (int, float, decimal.Decimal)):
         #     event_ts = utils.unix2datetime(event_ts, to_tz = self.local_tz)
@@ -463,7 +447,7 @@ class Strategy(event_handler.EventHandler):
         return self.preprocess_event(event)
 
     def _process_event(self, event):
-        "Overrides the parent handle_event method to update clock."
+        "Overrides the parent _process_event method to update clock."
 
         # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
         if (event_ts := event[c.EVENT_TS]) > self.clock:
@@ -678,7 +662,7 @@ class Strategy(event_handler.EventHandler):
                 returns the net cash flow caused by the current strategy (w.r.t.
                 to the account holding the strategy).
         """
-        identifier = identifier or self.strategy_id
+        identifier = identifier or self.name
 
         ncf = 0
         for position in filter(lambda x: ~x.is_closed, self.positions.values()):
@@ -743,31 +727,42 @@ class Strategy(event_handler.EventHandler):
         else:
             return self.get_ncf(identifier) + self.get_nav(identifier)
 
-    def get_openpositionsummary(self):
+    def get_openpositionsummary(self, ext = False):
         """Summarize current positions on the owner/symbol level"""
         d = {}
         for position in filter(lambda x: ~x.is_closed, self.positions.values()):
-            if position.owner not in d.keys():
-                d[position.owner] = {}
-                d[position.owner][position.symbol] = position.get_summary()
-            elif position.symbol not in d[position.owner].keys():
-                d[position.owner][position.symbol] = position.get_summary()
+            # first get position summary
+            summary = position.get_summary()
+            # convert names to strategy_ids if needed
+            if ext:
+                summary['owner'] = self.externalize_item(summary['owner'])
+                summary['symbol'] = self.externalize_item(summary['symbol'])
+            owner = summary['owner']
+            symbol = summary['symbol']
+            # start a new item if this is a new owner
+            if owner not in d.keys():
+                d[owner] = {}
+                d[owner][symbol] = summary
+            # start a new item if this is a new symbol for the owner
+            elif symbol not in d[owner].keys():
+                d[owner][symbol] = summary
+            # else update quantities
             else:
-                d[position.owner][position.symbol]['risk'] += position.risk
-                d[position.owner][position.symbol]['quantity_open'] += position.quantity_open
-                d[position.owner][position.symbol]['quantity_pending'] += position.quantity_pending
-                d[position.owner][position.symbol]['commission'] += position.commission
-                d[position.owner][position.symbol]['credit'] += position.credit
-                d[position.owner][position.symbol]['debit'] += position.debit
+                for quantity in ['risk', 'quantity_open', 'quantity_pending',
+                                    'commission', 'credit', 'debit']:
+                    try:
+                        d[owner][symbol][quantity] += summary[quantity]
+                    except:
+                        pass
+
         return d
 
     def load_openpositions(self, openpositionsummary: dict):
         """Create open positions from a dicionary of open position summary"""
         for owner_summary in openpositionsummary.values():
             for owner_symbol_summary in owner_summary.values():
-                # convert owner to internal symbol if direct child
-                if owner_symbol_summary['owner'] in self.children.values():
-                    owner_symbol_summary['owner'] = [symbol for symbol, strategy_id in self.children.items() if strategy_id == owner_symbol_summary['owner']][0]
+                owner_symbol_summary['owner'] = self.internalize_item(owner_symbol_summary['owner'])
+                owner_symbol_summary['symbol'] = self.internalize_item(owner_symbol_summary['symbol'])
                 # Create a dummy position
                 if owner_symbol_summary['asset_class'] == c.CASH:
                     position = CashPosition(owner = owner_symbol_summary['owner'])
@@ -926,7 +921,7 @@ class Strategy(event_handler.EventHandler):
         Returns:
             strategy.position: The newly created position.
         """
-        owner = owner or self.strategy_id
+        owner = owner or self.name
         if symbol in self.children.values():
             default_asset_class = c.STRATEGY
         else:
@@ -938,7 +933,7 @@ class Strategy(event_handler.EventHandler):
         return position
 
     def prepare_order(self, order, position = None):
-        """Prepare an order for sending.
+        """Prepare an order with default arguments and create a position if none exists.
 
         Args:
             symbol (str): The symbol to create an order for.
@@ -952,25 +947,26 @@ class Strategy(event_handler.EventHandler):
             event.order_event: A properly formatted order associated with a position.
         """
         """Note that order does not impact strategy until it is actually placed"""
-        _owner = order.get(c.STRATEGY_ID) or self.strategy_id
-        symbol = order[c.SYMBOL]
 
-        # Convert children strategy_ids to their names
-        if _owner in self.children.values():
-            _owner = [k for k, v in self.children.items() if v == _owner][0]
+        order[c.OWNER] = order.get(c.OWNER) or self.name
+        
+        # internalize_order and externalize_order change the symbol and owners of the order
+        _order = self.internalize_order(order)
+        _owner = _order.get(c.OWNER)
+        _symbol = _order[c.SYMBOL]
         
         # assign the order to a position
         if position is None:
             # If there is a position with the symbol already, use the latest one of the positions with the same symbol
-            current_positions_in_symbol = list(filter(lambda pos: (~pos.is_closed) and (pos.symbol == symbol) and (pos.owner == _owner), self.positions.values()))
+            current_positions_in_symbol = list(filter(lambda pos: (~pos.is_closed) and (pos.symbol == _symbol) and (pos.owner == _owner), self.positions.values()))
             if len(current_positions_in_symbol) > 0:
                 position = current_positions_in_symbol[-1]
             else:
                 # else create a new position
-                position = self.create_position(symbol = symbol, owner = _owner)
+                position = self.create_position(symbol = _symbol, owner = _owner)
         elif isinstance(position, dict):
             # If position details are supplied in a dict, create a new position with those details
-            position = self.create_position(strategy = self, symbol = symbol, **position)
+            position = self.create_position(symbol = _symbol, owner = _owner, **position)
         elif isinstance(position, Position):
             pass
         else:
@@ -982,16 +978,17 @@ class Strategy(event_handler.EventHandler):
         # since the ones that are used in the parent position are aggregated on
         # the owner/symbol level
         info = {
-            c.STRATEGY_ID: _owner,
+            c.OWNER: _owner,
             c.TRADE_ID: order.get(c.TRADE_ID) or position.trade_id,
             c.POSITION_ID: order.get(c.POSITION_ID) or position.position_id,
             c.ORDER_ID: order.get(c.ORDER_ID) or str(uuid.uuid1()),
             c.EVENT_TS: self.clock
         }
 
-        order = {**order, **info}
+        order = {**_order, **info}
+        _order = self.internalize_order(order)
         order = self.externalize_order(order)
-        return order
+        return _order, order
 
     def internalize_order(self, order):
         """ Returns a copy of the order for internal processing.
@@ -1003,11 +1000,19 @@ class Strategy(event_handler.EventHandler):
         """
 
         _order = copy.deepcopy(order)
+        # change child strategy_ids to internal child name
+        # symbol
         if (symbol := _order.get(c.SYMBOL)) in self.children.values():
             _order[c.SYMBOL] = [k for k, v in self.children.items() if v == symbol][0]
         # same for owner
-        if (owner := _order.get(c.STRATEGY_ID)) in self.children.values():
-            _order[c.STRATEGY_ID] = [k for k, v in self.children.items() if v == owner][0]
+        if (owner := _order.get(c.OWNER)) in self.children.values():
+            _order[c.OWNER] = [k for k, v in self.children.items() if v == owner][0]
+        
+        # and put the strategy's name instead of the strategy_id
+        if symbol == self.strategy_id:
+            _order[c.SYMBOL] = self.name
+        if owner == self.strategy_id:
+            _order[c.OWNER] = self.name
 
         return _order
 
@@ -1020,14 +1025,36 @@ class Strategy(event_handler.EventHandler):
         """
 
         order = copy.deepcopy(order)
+        # change internal child name to child strategy_ids
+        # symbol
         if (symbol := order.get(c.SYMBOL)) in self.children.keys():
             order[c.SYMBOL] = self.children[symbol]
-
         # same for owner
-        if (owner := order.get(c.STRATEGY_ID)) in self.children.keys():
-            order[c.STRATEGY_ID] = self.children[owner]
+        if (owner := order.get(c.OWNER)) in self.children.keys():
+            order[c.OWNER] = self.children[owner]
 
+        # and put the strategy's name instead of the strategy_id
+        if symbol == self.name:
+            order[c.SYMBOL] = self.strategy_id
+        if owner == self.name:
+            order[c.OWNER] = self.strategy_id
         return order
+    
+    def internalize_item(self, item):
+        if item == self.strategy_id:
+            return self.name
+        elif item in self.children.values():
+            return list(filter(lambda x: x[1] == item, self.children.items()))[0][0]
+        else:
+            return item
+    
+    def externalize_item(self, item):
+        if item == self.name:
+            return self.strategy_id
+        elif item in self.children.keys():
+            return self.children[item]
+        else:
+            return item
 
     def positions_handle_order(self, order):
         """Have the strategy's positions handle an order.
@@ -1036,9 +1063,9 @@ class Strategy(event_handler.EventHandler):
             order (event.order_event): order to process.
         """
         _order = self.internalize_order(order)
-        _owner = _order[c.STRATEGY_ID]
+        _owner = _order[c.OWNER]
         _symbol = _order[c.SYMBOL]
-        _cash_for_self = (_symbol == self.strategy_id)
+        _cash_for_self = (_symbol == self.name)
         _cash_for_child = (_symbol in self.children.keys())
 
         # If cash for self, update the cash position and we're done
@@ -1046,7 +1073,7 @@ class Strategy(event_handler.EventHandler):
             # NAV before adding cash
             nav_0 = self.get_nav()
             # handle the cash flow
-            self.cash._handle_event(order)
+            self.cash._handle_event(_order)
             # negate the net amount to sender to get net amount to self
             amount = -(order[c.CREDIT] - order[c.DEBIT])
             # dilute shares so that the mark of the position is not changed by adding cash
@@ -1056,10 +1083,9 @@ class Strategy(event_handler.EventHandler):
                 self.shares = self.shares * (self.get_nav() + amount) / nav_0
             return
 
-
         # Otherwise this is an order for other strategies/assets
         # if this strategy owns this order
-        if _order[c.STRATEGY_ID] == self.strategy_id:
+        if _order[c.OWNER] == self.strategy_id:
             position = self.positions[_order[c.POSITION_ID]]
             position._handle_event(_order)
         # otherwise find the position that owns this order
@@ -1116,9 +1142,8 @@ class Strategy(event_handler.EventHandler):
                 order = OrderEvent.cash_order(symbol, quantity)
             else:
                 order = OrderEvent.market_order(symbol, quantity)
-
-        order = self.prepare_order(order, position = None)
-        self.positions_handle_order(order)
+        _order, order = self.prepare_order(order, position = None)
+        self.positions_handle_order(_order)
         # PLACE THE ORDER
         if order[c.SYMBOL] in self.children.values():
             order = self.format_strategy_chain(order, c.DOWN)
@@ -1214,6 +1239,7 @@ class Strategy(event_handler.EventHandler):
             # skip strategies---we will aggregate the underlying posiitons directly
             if pos.asset_class != c.STRATEGY:
                 quantities = pd.Series(data = pos.quantity_history[1], index = pos.quantity_history[0])
+                quantities = quantities.groupby(level = 0).last()
                 # Get data with corresponding symbol
                 if pos.asset_class == c.CASH:
                     marks = decimal.Decimal('1.00')
@@ -1229,8 +1255,9 @@ class Strategy(event_handler.EventHandler):
                     quantities = quantities.reindex(marks.index)
                 eq_curve = quantities * marks
 
-                name = f'{pos.owner.replace(self.strategy_id, self.name)}||||{pos.symbol}||||{pos.position_id}'
-                eq_curves[name] = eq_curve
+                name = f'{pos.owner}||||{pos.symbol}||||{pos.position_id}'
+                # get last item if there are multiple items for a single timestamp
+                eq_curves[name] = eq_curve.groupby(level = 0).last()
         
         df_eq_curves = pd.DataFrame(eq_curves)
         if agg is None:

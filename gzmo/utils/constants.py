@@ -207,12 +207,6 @@ LOC = 'LOC'     # Limit on close
 FOK = 'FOK'     # Fill or kill
 IOC = 'IOC'     # Immediate or cancel
 
-# session socket modes
-ALL = 'ALL'
-STRATEGIES_FULL = 'STRATEGIES_FULL'
-STRATEGIES_INTERNALONLY = 'STRATEGIES_INTERNALONLY'
-NONE = 'NONE'
-
 
 # data attributes
 # CONNECTION_TYPE = 'CONNECTION_TYPE'

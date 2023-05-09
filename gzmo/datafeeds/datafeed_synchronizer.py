@@ -83,6 +83,7 @@ class DatafeedSynchronizer(BaseDataFeed):
             for i, datafeed in self.dict_datafeeds.items():
                 if (not datafeed.is_finished) and (self.next_events.get(i) is None):
                     if (res := datafeed.fetch(1)) is not None:
+                        print('in sync', res)
                         self.next_events[i] = res
 
             # Sort the events
