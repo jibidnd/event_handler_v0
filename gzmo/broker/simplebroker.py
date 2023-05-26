@@ -46,14 +46,45 @@ class SimpleBroker(BaseBroker):
         Args:
             fill_method (callable[[dict], [dict]]): A callable with signature (order, data) that returns any
                 (partially or fully) filled order.
+            data_address (str): If using sockets, the zmq address to receive (price) data from,
+            so the broker (simulator) can know whether/how to fill an incoming order.
         """  
         super().__init__(name, zmq_context)
         self.fill_method = fill_method
         
+        self.data_address = None
         self.closed_orders = []
         self.data_cache = defaultdict(lambda: deque(maxlen = 1))    # to handle left- or center- aligned bars
         self.clock = pd.Timestamp(0.0)          # This is directly linked to the latest event's 
+        self.open_orders = {}                   # better to refer to orders by id so we can refer to the same order even if attributes change
     
+    # ----------------------------------------------------------------------------------------
+    # Connections
+    # ----------------------------------------------------------------------------------------
+    def connect_data_socket(self, data_address):
+        """Connects a socket to the specified `data_address`.
+
+        Args:
+            data_address (str): A ZMQ address string in the form of 'protocol://interface:port’.
+        """
+        # if new address, overwrite the current record
+        self.data_address = data_address
+        
+        # establish a context if none provided
+        if self.zmq_context is None:
+            self.zmq_context = zmq.Context.Instance()
+        
+        # Create a data socket if none exists yet
+        if not self.data_socket:
+            socket = self.zmq_context.socket(zmq.SUB)
+            self.data_socket = socket
+        
+        # subscribe to everything because we don't know what we'll need to match orders against
+        self.data_socket.setsockopt(zmq.SUBSCRIBE, b'')
+        self.data_socket.connect(data_address)
+        
+        return
+
     # ----------------------------------------------------------------------------------------
     # Event handling
     # ----------------------------------------------------------------------------------------

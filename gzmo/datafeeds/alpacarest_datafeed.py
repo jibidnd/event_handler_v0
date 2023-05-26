@@ -1,6 +1,7 @@
 import requests
 import urllib.parse
 import decimal
+from collections import deque
 
 import pandas as pd
 
@@ -72,7 +73,7 @@ class AlpacaRestDataFeed(BaseDataFeed):
             'APCA-API-SECRET-KEY': self.auth['APCA-API-SECRET-KEY']
         }
 
-        self.results = []
+        self.results = deque()
         
         return
 
@@ -194,51 +195,37 @@ class AlpacaRestDataFeed(BaseDataFeed):
         
 
     def fetch(self, limit = 1):
-        """Return the requested number of records.
+        """Return available records up to `limit` as a list of events (dictionaries).
 
-            `limit` records will be returned. If limit == 1, a dictionary of a single record
-                will be returned. If limit > 1, a list of dictionaries will be returned. The keys
-                of the dictionaries will be the column names, and the values will be the record values.
-            
             If self.from_beginning is True (as it is set when the datafeed is instantiated),
             the query will be executed when this method is called.
 
-
         Args:
-            limit (int, optional): The number of records to return. Defaults to 1.
+            limit (int, optional): The max number of records to return. Defaults to 1.
 
         Returns:
-            list[dict] or dict: The queried data as record(s).
+            list of dict: The queried data as record(s).
         """        
         # if starting over
         if self.from_beginning:
             self.execute_query()
 
-        # results to return
-        res = []
-
-        while (limit is None) or (len(res) < limit):
-            # Fill res with API responses, `get`-ing more if needed
-            if len(self.results) > (n_needed := (limit - len(res))):
-                res.extend(self.results[:n_needed])
-                self.results = self.results[n_needed:]
-            elif len(self.results) <= n_needed:
-                # add what we have
-                res.extend(self.results)
-                self.results = []
+        # return up to `limit` records
+        d_res = deque()
+        for i in range(limit):
+            try:
+                d_res.append(self.results.popleft())
+            except IndexError:
                 # get next page of results if there are more
                 if self.request_params.get('page_token') is not None:
                     self.execute_query()
+                    d_res.append(self.results.popleft())
                 else:
                     # since the query has been executed at least once,
                     # if there is no page_token, it means we're done.
                     self.is_finished = True
                     break
-        # return a list only if limit > 1
-        if limit > 1:
-            return res
-        elif limit == 1:
-            if len(res) > 0:
-                return res[0]
-            else:
-                return
+            except:
+                raise
+        
+        return list(d_res)

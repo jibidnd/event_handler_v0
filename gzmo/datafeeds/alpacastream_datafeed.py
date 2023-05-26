@@ -20,8 +20,12 @@ class AlpacaStreamDataFeed(BaseDataFeed):
     but only returns up to `cache` records.
     """
 
-    def __init__(self,  *args, cache = 10,**kwargs):
+    def __init__(self,  *args, cache = 100,**kwargs):
         """Inits the stream datafeed object
+
+        Data from the websocket is streamed and cached in a deque.
+        Items from the deque is removed when `fetch` is called,
+        When the deque gets full, oldest items are removed to make space.
 
         Args:
             cache (int, optional): Number of records to cache for `fetch` method. Defaults to 10.
@@ -41,9 +45,6 @@ class AlpacaStreamDataFeed(BaseDataFeed):
         self.source = 'iex'
 
         self.results = deque(maxlen = cache)
-
-        # override parent method to skip fetching
-        self.publish = self.execute_query
 
 
         return
@@ -113,26 +114,7 @@ class AlpacaStreamDataFeed(BaseDataFeed):
             # append the message to results for fetching later
             if message is not None:
                 self.results.append(message)
-        
-        # # publish the message if there is a socket
-        # if self.sock_out is not None:
-        #     try:
-        #         # send the event with a topic
-        #         res_packed = utils.packb(message)
-        #         self.sock_out.send_multipart([self.topic.encode(), res_packed], flag = zmq.NOBLOCK)
-        #     except zmq.ZMQError as exc:
-        #         # Drop messages if queue is full
-        #         if exc.errno == zmq.EAGAIN:
-        #             pass
-        #         else:
-        #             # unexpected error: shutdown and raise
-        #             self.shutdown()
-        #             raise
-        #     except zmq.ContextTerminated:
-        #         # context is being closed by session
-        #         self.shutdown()
-        #     except:
-        #         raise
+
     
     def _stop(self):
         """Overrides parent method to close websocket."""
@@ -187,49 +169,31 @@ class AlpacaStreamDataFeed(BaseDataFeed):
         return _result
 
     def fetch(self, limit = 1):
-        """Return the requested number of records.
-
-            Note that since this is a live datafeed, the method will block
-            until `limit` records are returned.
-
-            If limit == 1, a dictionary of a single record
-                will be returned. If limit > 1, a list of dictionaries will be returned. The keys
-                of the dictionaries will be the column names, and the values will be the record values.
+        """Return available records up to `limit` as a list of events (dictionaries).
             
             If self.from_beginning is True (as it is set when the datafeed is instantiated),
             the query will be executed when this method is called.
 
         Args:
-            limit (int, optional): The number of records to return. Defaults to 1.
+            limit (int, optional): The max number of records to return. Defaults to 1.
 
         Returns:
-            list[dict] or dict: The queried data as record(s).
+            list of dict: The queried data as record(s).
         """        
         # if starting over
         if self.from_beginning:
             self.execute_query()
 
-        res = []
-        if limit is None:
-            res.extend(list(self.results))
-            return res
-        else:
-            while len(res) < limit:
-                if len(self.results) == 0:
-                    # wait a little bit to see if we can gather more data
-                    time.sleep(0.1)
-                else:
-                    if len(self.results) > (n_needed := (limit - len(res))):
-                        res.extend(itertools.islice(self.results, None, n_needed))
-                        self.results = deque(itertools.islice(self.results, n_needed + 1, None))
-                    elif 0 < len(self.results) <= n_needed:
-                        # add what we have
-                        res.extend(self.results)
-                        # remove from results
-                        self.results = deque()
-            # return a list only if limit > 1
-            if limit > 1:
-                return res
-            elif limit == 1:
-                return res[0]
+        # return up to `limit` records
+        d_res = deque()
+        for i in range(limit):
+            try:
+                d_res.append(self.results.popleft())
+            except IndexError:
+                break
+            except:
+                raise
+        
+        return list(d_res)
+        
         

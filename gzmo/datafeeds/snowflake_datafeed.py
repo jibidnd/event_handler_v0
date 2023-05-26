@@ -91,8 +91,4 @@ class SnowflakeDataFeed(BaseDataFeed):
             self.is_finished = True
             return
         
-        # return a list only if limit > 1
-        if limit > 1:
-            return res
-        elif limit == 1:
-            return res[0]
+        return res

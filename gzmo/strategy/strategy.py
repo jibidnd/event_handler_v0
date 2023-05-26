@@ -370,89 +370,11 @@ class Strategy(event_handler.EventHandler):
             self.shares = self.shares * (self.get_nav() + amount) / nav_0
 
         return
+
     # ----------------------------------------------------------------------------------------------------
-    # Session stuff
+    # Business Logic
     # ----------------------------------------------------------------------------------------------------
 
-    def start(self, session_shutdown_flag = None, pause = 1):
-        """Main event loop to handle events from sockets.
-
-        The main event loop continuously checks for events from the communication, data,
-            and order sockets and handles them.
-
-        At any time, the strategy will have visibility of the next event from each socket:
-        Data, order, communication; as stored in next_events.
-        If any of these slots are empty, the strategy will make 1 attempt to receive data
-        from the socket.
-
-        Then, the events in next_events will be sorted by event_ts, and the very next
-        event will be handled.
-
-        The logic then resets and loops forever.
-
-        The logic is roughly as follow:
-            - Populate next communication event if not already populated
-            - Populate next data event if not already populated
-            - Populate next order event if not already populated
-            - Sort the next communication, data, and order events by EVENT_TS
-            - Handle the earliest of the 3 events
-            - Loop
-
-        """
-        # TODO: what if we lag behind in processing? how do we catch up?
-
-        if session_shutdown_flag is None:
-            session_shutdown_flag = self._shutdown_flag
-            session_shutdown_flag.clear()
-
-        while (not session_shutdown_flag.is_set()) and (not self._shutdown_flag.is_set()):
-            if not self._next():
-                # so we don't take up too much resources when backtesting by
-                # going in an empty infinitely loop
-                time.sleep(pause)
-
-    """
-    ----------------------------------------------------------------------------------------------------
-    Business logic go here
-    The private methods perform default actions (e.g. passing an order, etc)
-        and calls the abstractmethods, which contain the business logic unique to the strategy.
-    ----------------------------------------------------------------------------------------------------
-    """
-
-    def _preprocess_event(self, event):
-        """Overrides parent method to handle event_ts.
-
-        Called before `preprocess_event`, which may be overridden.
-
-        Args:
-            event (dict): Event to be preprocessed.
-
-        Returns:
-            event: The preprocessed event.
-        """
-        # preprocess received events prior to handling them
-
-        # localize the event ts
-        # event_ts should already be a pd.Timestamp object from unpacking
-        # if no timezone information, assume already in local time
-        event[c.EVENT_TS] = event[c.EVENT_TS].tz_convert(self.local_tz)
-
-        # event_ts = event[c.EVENT_TS]
-        # if isinstance(event_ts, (int, float, decimal.Decimal)):
-        #     event_ts = utils.unix2datetime(event_ts, to_tz = self.local_tz)
-        # elif isinstance(event_ts, datetime.datetime):
-        #     event_ts = event_ts.astimezone(self.local_tz)
-        # event[c.EVENT_TS] = event_ts
-
-        return self.preprocess_event(event)
-
-    def _process_event(self, event):
-        "Overrides the parent _process_event method to update clock."
-
-        # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
-        if (event_ts := event[c.EVENT_TS]) > self.clock:
-            self.clock = event_ts
-        return super()._process_event(event)
 
     def _process_data(self, data):
         """Updates lines in self.datas with data event."""
@@ -462,13 +384,11 @@ class Strategy(event_handler.EventHandler):
             # TODO:
             raise
             # log error: data event not well formed
-            return
         # If a line exists, update it
         if self.datas.get(symbol) is not None:
             self.datas[symbol].update_with_data(data)
         
-        self.process_data(data)
-        return
+        return super()._process_data(data)
 
     def _process_order(self, order):
         """Processes an order event.
@@ -514,8 +434,7 @@ class Strategy(event_handler.EventHandler):
                 original_sender = order[c.STRATEGY_CHAIN].pop()
                 self.to_child(original_sender, order)
         
-        self.process_order(order)
-        return
+        return super()._process_order(order)
 
     def _process_communication(self, communication):
         """Processes a communication event.
@@ -554,8 +473,7 @@ class Strategy(event_handler.EventHandler):
         else:
             pass
         
-        self.process_communication(communication)
-        return
+        return super()._process_communication(communication)
     
     
     """

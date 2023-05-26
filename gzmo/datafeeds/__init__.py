@@ -49,7 +49,7 @@ class BaseDataFeed(abc.ABC):
         self.query = query
         self.zmq_context = zmq_context or zmq.Context.instance()
         self.from_beginning = True
-        self._start_barrier = threading.Barrier(1)  # default to not wait for anyone else to start publishing
+        # self._start_barrier = threading.Barrier(1)  # default to not wait for anyone else to start publishing
         self.is_finished = False
         self._shutdown_flag = threading.Event()
         self.publishing_socket = None
@@ -84,6 +84,7 @@ class BaseDataFeed(abc.ABC):
     @abc.abstractmethod
     def execute_query(self):
         """Authentication and connections should be made here."""
+        # make sure to mark "self.from_beginning = False"
         pass
 
     @abc.abstractmethod
@@ -95,8 +96,8 @@ class BaseDataFeed(abc.ABC):
     def fetch(self, limit = 1):
         pass
     
-    def run(self, session_shutdown_flag = None, pause = 1):
-        self._start(session_shutdown_flag = session_shutdown_flag, pause = pause)
+    def run(self, session_shutdown_flag=None, pause=1):
+        self._start(session_shutdown_flag=session_shutdown_flag, pause=pause)
         self._stop()
         return
 
@@ -150,16 +151,6 @@ class BaseDataFeed(abc.ABC):
                 return True
             else:
                 return False
-            #         elif exc.errorno == zmq.ContextTerminated:
-            #             # context is being closed by session
-            #             return False
-            #         else:
-            #             # unexpected error: shutdown and raise
-            #             raise
-            #     return True
-            # else:
-            #     return False
-
 
     def _stop(self):
         """Shuts down gracefully."""
@@ -219,6 +210,7 @@ class DataFeedQuery:
             }
         return q
 
+# TODO: move to somwhere else?
 class DataEvent:
     """Subclasses Event to have data-specific events.
     

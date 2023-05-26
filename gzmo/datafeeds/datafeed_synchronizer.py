@@ -1,3 +1,5 @@
+from collections import deque
+
 import zmq
 
 from . import BaseDataFeed
@@ -76,32 +78,23 @@ class DatafeedSynchronizer(BaseDataFeed):
             self.from_beginning = False
         
         counter = 0
-        results = []
+        d_res = deque()
 
-        while counter < limit:
+        while i in range(limit):
             # Attempt to fill the event queue for any slots that are empty
             for i, datafeed in self.dict_datafeeds.items():
                 if (not datafeed.is_finished) and (self.next_events.get(i) is None):
                     if (res := datafeed.fetch(1)) is not None:
-                        print('in sync', res)
                         self.next_events[i] = res
 
-            # Sort the events
+            # If there are more events, sort the events and add the first one to results
             if len(self.next_events) > 0:
                 # sort key: sync key of the event msg of the dict value ([1] of dict.items())
                 next_socket = sorted(self.next_events.items(), key = lambda x: x[1][self.sync_key])[0][0]
                 # return first event
-                results.append(self.next_events.pop(next_socket))
-                counter += 1
+                d_res.append(self.next_events.pop(next_socket))
             else:
-                # otherwise return None
+                # otherwise return whatever we have
                 break
-
-        if len(results) == 0:
-            self.is_finished = True
-            return
-
-        if limit > 1:
-            return results
-        elif limit == 1:
-            return results[0]
+        
+        return d_res

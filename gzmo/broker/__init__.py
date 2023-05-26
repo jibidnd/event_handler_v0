@@ -16,10 +16,9 @@ from ..utils import constants as c
 
 
 class BaseBroker(event_handler.EventHandler, abc.ABC):
-    """A broker is an interface that takes orders and/or data, and return responses to orders.
+    """A broker is an interface that takes orders, and return responses to orders.
 
-    The responses can either be sent via a socket (which the receiving end will connect to),
-    or be returned through a broker method.
+    The responses can be sent via a socket (which the receiving end will connect to).
 
     Attributes:
         name (str): A name for the broker.
@@ -27,8 +26,6 @@ class BaseBroker(event_handler.EventHandler, abc.ABC):
         zmq_context (zmq.Context): A zmq context on which sockets will be established.
         open_orders (dict): Dictionary of currently open orders (waiting to be filled).
         closed_orders (list): A list of filled/closed orders.
-        data_address (str): If using sockets, the zmq address to receive (price) data from,
-            so the broker (simulator) can know whether/how to fill an incoming order.
         order_address (str): If using sockets, the address to receive orders from.
         logging_address(str): If using sockets, the address to send logs to.
         data_socket (zmq socket): If using sockets, the socket to receive (price) data from.
@@ -67,43 +64,16 @@ class BaseBroker(event_handler.EventHandler, abc.ABC):
             self.auth = auth
 
         # Connection things
-        self.data_address = None
+
         self.order_address = None
         self.logging_addresses = None
         
         self._shutdown_flag = threading.Event()
-
-        self.open_orders = {}                   # better to refer to orders by id so we can refer to the same order even if attributes change
-
-        # clock to keep track of time
-        # self.clock = Decimal(0.00)
     
     # ----------------------------------------------------------------------------------------
     # Connections
     # ----------------------------------------------------------------------------------------
-    def connect_data_socket(self, data_address):
-        """Connects a socket to the specified `data_address`.
 
-        Args:
-            data_address (str): A ZMQ address string in the form of 'protocol://interface:port’.
-        """
-        # if new address, overwrite the current record
-        self.data_address = data_address
-        
-        # establish a context if none provided
-        if self.zmq_context is None:
-            self.zmq_context = zmq.Context.Instance()
-        
-        # Create a data socket if none exists yet
-        if not self.data_socket:
-            socket = self.zmq_context.socket(zmq.SUB)
-            self.data_socket = socket
-        
-        # subscribe to everything because we don't know what we'll need to match orders against
-        self.data_socket.setsockopt(zmq.SUBSCRIBE, b'')
-        self.data_socket.connect(data_address)
-        
-        return
     
     def connect_order_socket(self, order_address):
         """Connects a socket to the specified `order_address`.
@@ -162,37 +132,16 @@ class BaseBroker(event_handler.EventHandler, abc.ABC):
         return order
     
     @abc.abstractmethod
-    def _place_order(self, order):
-        """Takes an order and returns any responses."""
-        self.place_order(order)
-        return
-    
     def place_order(self, order):
-        """To be overriden for desired custom action when placing orders."""
+        """Takes an order and returns any responses."""
         return
-
-    def _start(self, session_shutdown_flag = None, pause = 1):
-        """Processes events from sockets.
-
-            Sequentially process events arriving at the data and order sockets.
-            All *received* data are synced and processed chronologically, as indicated
-            by the EVENT_TS field of the event.
-        """
-
-        if session_shutdown_flag is None:
-            session_shutdown_flag = self._shutdown_flag
-            session_shutdown_flag.clear()
-
-        while (not session_shutdown_flag.is_set()) and (not self._shutdown_flag.is_set()):
-
-            if not self.next():
-                time.sleep(pause)
-        
-        self._stop()
     
-
+    # ----------------------------------------------------------------------------------------------------
+    # Business Logic
+    # ----------------------------------------------------------------------------------------------------
+    # TODO
     def _process_order(self, order):
-        """Class method to process an incoming order events.
+        """Method to process an incoming order events.
 
         Args:
             order (dict): Event with EVENT_TYPE = 'ORDER'. Should carry order parameters
@@ -204,7 +153,7 @@ class BaseBroker(event_handler.EventHandler, abc.ABC):
         # if this is an order request from a strategy
         if order_internal[c.EVENT_SUBTYPE] == c.REQUESTED:
             self.open_orders[order_internal[c.ORDER_ID]] = order_internal
-            if (response := self._place_order(order_external)) is not None:
+            if (response := self.place_order(order_external)) is not None:
                 self._handle_event(response)
         # otherwise it's a response from the broker.
         # Get/update the corresponding order and send it to the strategy
@@ -221,10 +170,6 @@ class BaseBroker(event_handler.EventHandler, abc.ABC):
         
         self.process_order(order)
         return
-
-    def _stop(self):
-        self.stop()
-        pass
 
 
 class OrderEvent:
