@@ -184,7 +184,6 @@ class EventHandler(abc.ABC):
             next_socket = sorted(self.next_events.items(), key = lambda x: x[1][c.EVENT_TS])[0][0]
             next_event = self.next_events.pop(next_socket)        # remove the event from next_events
             self._process_event(next_event)
-            self._post_event(next_event)
             had_activity = True
         
         return had_activity
@@ -217,7 +216,7 @@ class EventHandler(abc.ABC):
         # localize the event ts
         # event_ts should already be a pd.Timestamp object from unpacking
         # if no timezone information, assume already in local time?? TODO what's going on here?
-        event[c.EVENT_TS] = event[c.EVENT_TS].tz_convert(self.local_tz)
+        # event[c.EVENT_TS] = event[c.EVENT_TS].tz_convert(self.local_tz)
 
         # tick the clock if it has a larger timestamp than the current clock (not a late-arriving event)
         # if (event_ts := event[c.EVENT_TS]) > self.clock:

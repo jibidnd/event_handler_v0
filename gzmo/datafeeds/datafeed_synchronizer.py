@@ -19,31 +19,22 @@ class DatafeedSynchronizer(BaseDataFeed):
 
     Args:
         sync_key (str): The key to sort events by
-        datafeeds (iterable, optional): Iterable of datafeeds to synchronize. Defaults to None.
+        datafeeds (dict): Iterable of datafeeds to synchronize. Defaults to None.
     """
-    def __init__(self, sync_key = 'EVENT_TS', datafeeds = None, zmq_context = None):
+    def __init__(self, datafeeds, sync_key = 'EVENT_TS', zmq_context = None):
 
         super().__init__(None, zmq_context)
-        self.datafeeds = datafeeds or []
+        self.datafeeds = datafeeds
         # A mapping to keep track of datafeeds
-        self.dict_datafeeds = {i: datafeed for i, datafeed in enumerate(datafeeds)} # number: datafeed
+        # self.dict_datafeeds = {i: datafeed for i, datafeed in enumerate(datafeeds)} # number: datafeed
         self.sync_key = sync_key
         # the "current" view of the immediately upcoming event of each datafeed
         self.next_events = {}   # datafeed number: (topic, event_msg)
 
-    def add_datafeed(self, datafeed):
-        """Adds a datafeed
-
-        Args:
-            datafeed: A datafeed that implements `execute_query` and `fetch`
-        """        
-        self.datafeeds.append(datafeed)
-        self.dict_datafeeds.update({len(self.dict_datafeeds): datafeed})
-
     def execute_query(self):
         """Executes the queries for each underlying datafeed.
         """        
-        for datafeed in self.datafeeds:
+        for datafeed in self.datafeeds.values():
             datafeed.execute_query()
         self.from_beginning = False
 
@@ -77,15 +68,14 @@ class DatafeedSynchronizer(BaseDataFeed):
             self.execute_query()
             self.from_beginning = False
         
-        counter = 0
         d_res = deque()
 
-        while i in range(limit):
+        for i in range(limit):
             # Attempt to fill the event queue for any slots that are empty
-            for i, datafeed in self.dict_datafeeds.items():
-                if (not datafeed.is_finished) and (self.next_events.get(i) is None):
-                    if (res := datafeed.fetch(1)) is not None:
-                        self.next_events[i] = res
+            for name, datafeed in self.datafeeds.items():
+                if (not datafeed.is_finished) and (self.next_events.get(name) is None):
+                    if (res := datafeed.fetch(1)):
+                        self.next_events[name] = res[0]
 
             # If there are more events, sort the events and add the first one to results
             if len(self.next_events) > 0:
