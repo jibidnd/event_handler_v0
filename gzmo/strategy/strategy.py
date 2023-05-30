@@ -239,12 +239,6 @@ class Strategy(event_handler.EventHandler):
                     # Create new lines if none exist yet
                 if line_args['symbol'] not in self.datas.keys():
                     self.datas[line_args['symbol']] = Lines(**line_args)
-
-        # subscribe to data now if not lazy
-        if not lazy:
-            assert self.data_socket is not None, \
-                'No data socket to subscribe data from.'
-            self.data_socket.setsockopt(zmq.SUBSCRIBE, topic.encode())
         return
 
     def add_parent(self, parent_strategy = None):

@@ -3,6 +3,7 @@ from collections import deque
 import pandas as pd
 
 from . import BaseDataFeed
+from ..utils import constants as c
 
 
 class PandasDatafeed(BaseDataFeed):
@@ -15,7 +16,7 @@ class PandasDatafeed(BaseDataFeed):
         super().__init__(topic, query=None, auth=auth, zmq_context=zmq_context)
         
         self.df = df
-        self.row_counter = 0
+        self.next_row = 0
     
     # Nothing to format since a pre-formatted dataframe is passed
     def format_query(self):
@@ -26,6 +27,8 @@ class PandasDatafeed(BaseDataFeed):
         pass
     
     def format_result(self, result):
+        result[c.TOPIC] = self.topic
+        result[c.EVENT_TS] = pd.Timestamp(result[c.EVENT_TS])
         return result
     
     def fetch(self, limit = 1):
@@ -40,14 +43,14 @@ class PandasDatafeed(BaseDataFeed):
         Returns:
             list of dict: The queried data as record(s).
         """      
-        if self.from_beginning:
-            self.row_counter = 0
         
         d_res = deque()
         for i in range(limit):
             try:
-                d_res.append(self.df.iloc[i].to_dict())
-                self.row_counter+= 1
+                res = self.df.iloc[self.next_row].to_dict()
+                formatted_res = self.format_result(res)
+                d_res.append(formatted_res)
+                self.next_row+= 1
             except IndexError:
                 self.is_finished = True
                 break

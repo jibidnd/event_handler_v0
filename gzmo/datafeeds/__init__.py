@@ -76,21 +76,21 @@ class BaseDataFeed(abc.ABC):
         #    a multiple publisher (datafeeds) - one subscriber (session) pattern
         self.publishing_socket.connect(address)
 
-    @abc.abstractmethod
-    def format_query(self, query):
-        """Translate the query from standard format to datafeed specific format."""
-        return
+    # @abc.abstractmethod
+    # def format_query(self, query):
+    #     """Translate the query from standard format to datafeed specific format."""
+    #     return
 
-    @abc.abstractmethod
-    def execute_query(self):
-        """Authentication and connections should be made here."""
-        # make sure to mark "self.from_beginning = False"
-        pass
+    # @abc.abstractmethod
+    # def execute_query(self):
+    #     """Authentication and connections should be made here."""
+    #     # make sure to mark "self.from_beginning = False"
+    #     pass
 
-    @abc.abstractmethod
-    def format_result(self, result):
-        """Formats the datafeed result to internal standards."""
-        return
+    # @abc.abstractmethod
+    # def format_result(self, result):
+    #     """Formats the datafeed result to internal standards."""
+    #     return
 
     @abc.abstractmethod
     def fetch(self, limit = 1):
