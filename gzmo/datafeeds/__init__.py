@@ -49,7 +49,7 @@ class BaseDataFeed(abc.ABC):
         self.query = query
         self.zmq_context = zmq_context or zmq.Context.instance()
         self.from_beginning = True
-        # self._start_barrier = threading.Barrier(1)  # default to not wait for anyone else to start publishing
+        self._start_barrier = threading.Barrier(1)  # default to not wait for anyone else to start publishing
         self.is_finished = False
         self._shutdown_flag = threading.Event()
         self.publishing_socket = None

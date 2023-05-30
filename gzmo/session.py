@@ -157,7 +157,7 @@ class Session:
 
         self._setup_addresses(use_zmq)
 
-        self._setup_proxies(use_zmq, synced)
+        self._setup_proxies(use_zmq)
 
         self._setup_datafeeds(use_zmq, synced) # starts the datafeed threads
 
@@ -314,10 +314,10 @@ class Session:
             # to sync the different datafeeds
             if synced and (len(self.datafeeds) > 1):
                 # make a new synchronized datafeed
-                self.datafeeds['synced_datafeed'] = DatafeedSynchronizer(datafeeds = self.datafeeds)
+                self._synced_datafeed = DatafeedSynchronizer(datafeeds = self.datafeeds)
                 #  give the synced datafeed a 'socket' to publish to
                 #   (not suing zmq, so self._proxies[c.DATA] is a proxy emulator)
-                self.datafeeds['synced_datafeed'].publishing_socket = \
+                self._synced_datafeed.publishing_socket = \
                     self._proxies[c.DATA].add_publisher('synced_datafeed')
             else:
                 # If not synced (and not using zmq), give everyone a 'socket' to publish to
@@ -449,8 +449,8 @@ class Session:
             while not self._main_shutdown_flag.is_set():
                 try:
                     had_activity = self.next()
-                    # if not had_activity:
-                    #     break
+                    if not had_activity:
+                        break
                 except KeyboardInterrupt:
                     self._main_shutdown_flag.set()
 
