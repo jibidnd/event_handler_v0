@@ -96,12 +96,12 @@ class BaseDataFeed(abc.ABC):
     def fetch(self, limit = 1):
         pass
     
-    def run(self, session_shutdown_flag=None, pause=1):
+    def run(self, session_shutdown_flag=None, pause = 0.001):
         self._start(session_shutdown_flag=session_shutdown_flag, pause=pause)
         self._stop()
         return
 
-    def _start(self, session_shutdown_flag = None):
+    def _start(self, session_shutdown_flag = None, pause=0.001):
         """Publishes the queried data to the socket.
 
             The queried data will be published to the socket, record by record, until
@@ -134,7 +134,7 @@ class BaseDataFeed(abc.ABC):
                 (not self.is_finished):
             if not self.next():
                 # pause if there is no data
-                time.sleep(0.01)
+                time.sleep(pause)
 
         return
 

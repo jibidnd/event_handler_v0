@@ -67,6 +67,8 @@ class EventHandler(abc.ABC):
     # -------------------------------------------------------------------
 
     def run(self):
+        # take and process events from zmq sockets
+        
         # setup
         self._setup()
         self.setup()
@@ -79,7 +81,7 @@ class EventHandler(abc.ABC):
     def _setup(self):
         pass
     
-    def _start(self, shutdown_flag):
+    def _start(self):
         """Main event loop to handle events from sockets.
 
         The main event loop continuously checks for events from the communication, data,
@@ -104,8 +106,15 @@ class EventHandler(abc.ABC):
             - Loop
         """
 
-        while not shutdown_flag.is_set():
-            if not self.next():
+        while True:
+            try:
+                has_activity = self.next()
+            except zmq.ContextTerminated:
+                self._stop
+            except:
+                raise
+            
+            if not has_activity:
                 # so we don't take up too much resources when backtesting by
                 # going in an empty infinitely loop
                 time.sleep(0.01)
@@ -114,7 +123,6 @@ class EventHandler(abc.ABC):
     def _stop(self):
         """Class internal method for actions when exiting.
 
-        Sets the shutdown floag and closes any open sockets.
         Called before `stop`.
         """
 
@@ -134,34 +142,34 @@ class EventHandler(abc.ABC):
             try:
                 event = self.communication_socket.recv(zmq.NOBLOCK)
                 self.next_events[c.COMMUNICATION_SOCKET] = utils.unpackb(event)
-            except zmq.ZMQError as exc:
-                if exc.errno == zmq.EAGAIN:
-                    # Nothing to grab
-                    pass
-                else:
-                    raise
+            except zmq.Again:
+                # Nothing to grab
+                pass
+            except:
+                # zmq.ContextTerminated will be passed through to self.next
+                raise
         
         if (self.next_events.get(c.DATA_SOCKET) is None) and (self.data_socket is not None):
             try:
                 topic, event = self.data_socket.recv_multipart(zmq.NOBLOCK)
                 self.next_events[c.DATA_SOCKET] = utils.unpackb(event)
-            except zmq.ZMQError as exc:
-                if exc.errno == zmq.EAGAIN:
-                    # Nothing to grab
-                    pass
-                else:
-                    raise
+            except zmq.Again:
+                # Nothing to grab
+                pass
+            except:
+                # zmq.ContextTerminated will be passed through to self.next
+                raise
 
         if (self.next_events.get(c.ORDER_SOCKET) is None) and (self.order_socket is not None):
             try:
                 event = self.order_socket.recv(zmq.NOBLOCK)
                 self.next_events[c.ORDER_SOCKET] = utils.unpackb(event)
-            except zmq.ZMQError as exc:
-                if exc.errno == zmq.EAGAIN:
-                    # Nothing to grab
-                    pass
-                else:
-                    raise
+            except zmq.Again:
+                # Nothing to grab
+                pass
+            except:
+                # zmq.ContextTerminated will be passed through to self.next
+                raise
 
     def next(self):
         """Processes the next event.
@@ -175,7 +183,9 @@ class EventHandler(abc.ABC):
 
         had_activity = False
 
+        # may raise zmq.ContextTerminated
         self._get_next_events()
+            
 
         # Now we can sort the upcoming events and process the next event
         if len(self.next_events) > 0:

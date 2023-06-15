@@ -65,9 +65,9 @@ class Session:
         """
 
         self.use_zmq = use_zmq
-
-        # Use one context for all communication (thread safe)
-        self._zmq_context = zmq.Context()
+        if self.use_zmq:
+            # Use one context for all communication (thread safe)
+            self._zmq_context = zmq.Context()
 
         # instances and threads
         # Strategies
@@ -111,7 +111,7 @@ class Session:
         threading.excepthook = self.excepthook
 
     def excepthook(self, args):
-        self._stop()
+        self.stop()
         raise Exception(f'caught {args.exc_type} with value {args.exc_value} in thread {args.thread}\n')
 
     def add_strategy(self, name, strategy):
@@ -148,21 +148,19 @@ class Session:
     def setup(self):
         """Sets up things."""
 
-        use_zmq = self.use_zmq
+        self._setup_addresses(self.use_zmq)
 
-        self._setup_addresses(use_zmq)
+        self._setup_proxies(self.use_zmq)
 
-        self._setup_proxies(use_zmq)
+        self._setup_datafeeds(self.use_zmq) # starts the datafeed threads
 
-        self._setup_datafeeds(use_zmq) # starts the datafeed threads
+        self._setup_brokers(self.use_zmq) # starts the broker threads
 
-        self._setup_brokers(use_zmq) # starts the broker threads
-
-        self._setup_strategies(use_zmq)
+        self._setup_strategies(self.use_zmq)
 
         self.is_setup = True
 
-    def _setup_addresses(self, use_zmq):
+    def _setup_addresses(self):
         """Obtains free tcp addresses for setting up sockets."""
 
         # addresses to avoid
@@ -170,7 +168,7 @@ class Session:
         # inproc was found to be rather unstable for some reason, so we stick with tcp.
         addresses_used = []
 
-        if use_zmq:
+        if self.use_zmq:
 
             # broker backend
             self._broker_broker_address, _, _ = utils.get_free_tcp_address(exclude = addresses_used)
@@ -201,7 +199,7 @@ class Session:
 
         return
 
-    def _setup_proxies(self, use_zmq):
+    def _setup_proxies(self):
         """Sets up proxies to relay data, orders, and communications.
         
         This is so that strategies can have one central place to receive/post data.
@@ -222,30 +220,40 @@ class Session:
         else:
             default_broker = None
 
-        if use_zmq:
+        if self.use_zmq:
             datafeed_proxy = zmq_datafeed_proxy(
                 self._datafeed_publisher_address,
                 self._datafeed_subscriber_address,
                 self._datafeed_capture_address,
-                self.zmq_context
+                self._zmq_context
             )
             # The broker proxy designates a default broker to send orders to
             broker_proxy = zmq_broker_proxy(
                 self._broker_broker_address,
                 self._broker_strategy_address,
                 self._broker_capture_address,
-                self.zmq_context,
+                self._zmq_context,
                 default_broker
             )
             communication_proxy = zmq_communication_proxy(
                 self._communication_address,
                 self._communication_capture_address,
-                self.zmq_context
+                self._zmq_context
             )
-            loggin_proxy = zmq_logging_proxy(
+            logging_proxy = zmq_logging_proxy(
                 self._logging_address,
-                self.zmq_context
+                self._zmq_context
             )
+        
+            # set up the proxy threads
+            self._proxy_threads[c.DATA] = \
+                threading.Thread(name = 'data_proxy_thread', target = datafeed_proxy.run, daemon = True)
+            self._proxy_threads[c.BROKER] = \
+                threading.Thread(name = 'broker_proxy_thread', target = broker_proxy.run, daemon = True)
+            self._proxy_threads[c.COMMUNICATION] = \
+                threading.Thread(name = 'communication_proxy_thread', target = communication_proxy.run, daemon = True)
+            self._proxy_threads['LOGGING'] = \
+                threading.Thread(name = 'logging_proxy_thread', target = logging_proxy.run, daemon = True)
         
         else:
             datafeed_proxy = DatafeedProxyEmulator()
@@ -253,16 +261,20 @@ class Session:
             communication_proxy = CommunicationProxyEmulator()
             logging_proxy = LoggingProxyEmulator()
 
+            # set up the proxy threads
+            self._proxy_threads[c.DATA] = \
+                threading.Thread(name = 'data_proxy_thread', target = datafeed_proxy.run, args = (self._main_shutdown_flag,), daemon = True)
+            self._proxy_threads[c.BROKER] = \
+                threading.Thread(name = 'broker_proxy_thread', target = broker_proxy.run, args = (self._main_shutdown_flag,), daemon = True)
+            self._proxy_threads[c.COMMUNICATION] = \
+                threading.Thread(name = 'communication_proxy_thread', target = communication_proxy.run, args = (self._main_shutdown_flag,), daemon = True)
+            self._proxy_threads['LOGGING'] = \
+                threading.Thread(name = 'logging_proxy_thread', target = logging_proxy.run, args = (self._main_shutdown_flag,), daemon = True)
+
         self._proxies[c.DATA] = datafeed_proxy
         self._proxies[c.BROKER] = broker_proxy
         self._proxies[c.COMMUNICATION] = communication_proxy
         self._proxies['LOGGING'] = logging_proxy
-
-        # start the proxies
-        self._proxy_threads[c.DATA] = threading.Thread(name = 'data_proxy_thread', target = datafeed_proxy.run, args = (self._main_shutdown_flag,), daemon = True)
-        self._proxy_threads[c.BROKER] = threading.Thread(name = 'broker_proxy_thread', target = broker_proxy.run, args = (self._main_shutdown_flag,), daemon = True)
-        self._proxy_threads[c.COMMUNICATION] = threading.Thread(name = 'communication_proxy_thread', target = communication_proxy.run, args = (self._main_shutdown_flag,), daemon = True)
-        self._proxy_threads['LOGGING'] = threading.Thread(name = 'logging_proxy_thread', target = logging_proxy.run, args = (self._main_shutdown_flag,), daemon = True)
 
         # Start the proxies
         for proxy_thread in self._proxy_threads.values():
@@ -271,7 +283,7 @@ class Session:
         return
             
 
-    def _setup_datafeeds(self, use_zmq):
+    def _setup_datafeeds(self):
         """Sets up the datafeeds.
 
         Sets up the datafeeds so that they know how to emit the data.
@@ -290,15 +302,14 @@ class Session:
         
         """
 
-
         # set up connections
-        if use_zmq:
+        if self.use_zmq:
             # need to wait for all datafeeds + the session to be ready
             self._datafeed_start_barrier = threading.Barrier(len(self.datafeeds) + 1)
         
             # If using ZMQ, let everyone know where to publish to
             for name, datafeed in self.datafeeds.items():
-                datafeed.zmq_context = self.zmq_context
+                datafeed.zmq_context = self._zmq_context
                 datafeed.publish_to(self._datafeed_publisher_address)
                 
                 # datafeeds will wait for a signal to all start together
@@ -308,7 +319,7 @@ class Session:
                 datafeed.execute_query()
             
                 # set up threads
-                datafeed_thread = threading.Thread(name = f'data_thread_{name}', target = datafeed.run, args = (self._main_shutdown_flag,), daemon = True)
+                datafeed_thread = threading.Thread(name = f'data_thread_{name}', target = datafeed.run, daemon = True)
                 self._datafeed_threads[name] = datafeed_thread
         
         else:
@@ -324,18 +335,18 @@ class Session:
         
         return
 
-    def _setup_brokers(self, use_zmq):
+    def _setup_brokers(self):
         """Sets up brokers for the different socket_modes."""
         # TODO: how would a `simplebroker` get data?
         for name, broker in self.brokers.items():
             # set up connections
-            if use_zmq:
-                broker.zmq_context = self.zmq_context
+            if self.use_zmq:
+                broker.zmq_context = self._zmq_context
                 # broker.connect_data_socket(self._datafeed_subscriber_address)
                 broker.connect_order_socket(self._broker_broker_address)
                 
                 # set up threads
-                broker_thread = threading.Thread(name = f'broker_thread_{name}', target = broker.run, args = (self._main_shutdown_flag,), daemon = True)
+                broker_thread = threading.Thread(name = f'broker_thread_{name}', target = broker.run, daemon = True)
                 self._broker_threads[name] = broker_thread
                 
             else:
@@ -361,7 +372,7 @@ class Session:
                 strategy.connect_logging_socket(self._logging_address)
                 
                 # set up the threads
-                strategy_thread = threading.Thread(name = f'strategy_thread_{name}', target = strategy.run, args = (self._main_shutdown_flag,), daemon = True)
+                strategy_thread = threading.Thread(name = f'strategy_thread_{name}', target = strategy.run, daemon = True)
                 self._strategy_threads[name] = strategy_thread
                 
             else:
@@ -490,12 +501,8 @@ class Session:
     def stop(self, linger = 0.1):
         """Exit gracefully."""
 
-        self._main_shutdown_flag.set()
-        # wait a second before terminating the context
-        time.sleep(linger)
-        self._zmq_context.destroy()
-        
         if self.use_zmq:
+            self._zmq_context.destroy()
             # wait for the threads to exit clean
             # _before_stop() and _stop() are called after shutdown flag is set
             for datafeed_thread in self._datafeed_threads.values():
@@ -507,10 +514,10 @@ class Session:
                 # _before_stop() and _stop() are called after shutdown flag is set
                 strategy_thread.join()
         else:
+            self._main_shutdown_flag.set()
             for strategy in self.strategies.values():
                 strategy._stop()
         
-
 class zmq_datafeed_proxy:
     """Relays messages from backend (datafeed producers) to frontend (strategies).
         
@@ -522,27 +529,26 @@ class zmq_datafeed_proxy:
         at ZMQ docs.
     """
 
-    def __init__(self, address_backend, address_frontend, address_capture = None, context = None):
+    def __init__(self, address_backend, address_frontend, address_capture, zmq_context):
 
         self.address_backend = address_backend
         self.address_frontend = address_frontend
-        self.address_capture = address_capture
-        self.context = context or zmq.Context.instance()
-        self._shutdown_flag = threading.Event()
+        self.address_capture = address_capture          
+        self.zmq_context = zmq_context
 
         # publisher facing socket
-        self.backend = context.socket(zmq.SUB)
+        self.backend = self.zmq_context.socket(zmq.SUB)
         # no filtering here (subscribe to everything)
         self.backend.setsockopt(zmq.SUBSCRIBE, b'')
         self.backend.bind(address_backend)
 
         # client facing socket
-        self.frontend = context.socket(zmq.PUB)
+        self.frontend = self.zmq_context.socket(zmq.PUB)
         self.frontend.bind(address_frontend)
         
-        if address_capture:
+        if address_capture is not None:
             # bind to capture address
-            self.capture = context.socket(zmq.PUB)
+            self.capture = self.zmq_context.socket(zmq.PUB)
             self.capture.bind(address_capture)
         else:
             self.capture = None
@@ -551,14 +557,10 @@ class zmq_datafeed_proxy:
         self._start()
         self._stop()
 
-    def _start(self, session_shutdown_flag = None):
+    def _start(self):
 
         if not self.is_setup:
             self.setup()
-
-        if session_shutdown_flag is None:
-            session_shutdown_flag = self._shutdown_flag
-            session_shutdown_flag.clear()
 
         # start the proxy
         try:
@@ -572,9 +574,7 @@ class zmq_datafeed_proxy:
             raise
 
     def _stop(self):
-        # TODO: is this needed?
         print('Shutting down zmq datafeed proxy.')
-        self._shutdown_flag.set()
 
 class zmq_broker_proxy:
     """Relays orders to the correct brokers/strategies.
@@ -601,31 +601,28 @@ class zmq_broker_proxy:
         strategy (dealer): receives order response
     
     """
-    def __init__(self, address_backend, address_frontend, address_capture = None, context = None, default_broker = None):
+    def __init__(self, address_backend, address_frontend, address_capture, zmq_context, default_broker):
         
         self.address_backend = address_backend
         self.address_frontend = address_frontend
         # self.address_capture = address_capture
-        self.context = context or zmq.Context.instance()
-        self._shutdown_flag = threading.Event()
+        self.zmq_context = zmq_context
         self.default_broker = default_broker
-        
-        self.context = context or zmq.Context.instance()
 
         # establish strategy facing socket
-        self.frontend = context.socket(zmq.ROUTER)
+        self.frontend = self.zmq_context.socket(zmq.ROUTER)
         self.frontend.bind(address_frontend)
         # establish broker facing socket
-        self.backend = context.socket(zmq.ROUTER)
+        self.backend = self.zmq_context.socket(zmq.ROUTER)
         self.backend.bind(address_backend)
         # TODO: implement capture socket
         # if there is a capture socket
-        # if address_capture:
-        #     # bind to capture address
-        #     self.capture = context.socket(zmq.PUB)
-        #     self.capture.bind(address_capture)
-        # else:
-        #     capture_socket = None
+        if address_capture:
+            # bind to capture address
+            self.capture = self.zmq_context.socket(zmq.PUB)
+            self.capture.bind(address_capture)
+        else:
+            capture_socket = None
 
         poller = zmq.Poller()
         poller.register(self.frontend, zmq.POLLIN)
@@ -635,13 +632,9 @@ class zmq_broker_proxy:
         self._start()
         self._stop()
 
-    def _start(self, session_shutdown_flag = None):
+    def _start(self):
 
-        if session_shutdown_flag is None:
-            session_shutdown_flag = self._shutdown_flag
-            session_shutdown_flag.clear()
-
-        while (not session_shutdown_flag.is_set()) and (not self._shutdown_flag.is_set()):
+        while True:
 
             try:
                 socks = dict(self.poller.poll(timeout = 10))
@@ -659,6 +652,7 @@ class zmq_broker_proxy:
                         broker = self.default_broker
 
                     if broker is None:
+                        # this really shouldn't happen unless user doesn't know how to set up the proxy
                         raise Exception('Either specify broker in order or specify default broker in session.')
                     
                     # send the order to the broker: (broker name, )
@@ -672,19 +666,17 @@ class zmq_broker_proxy:
                     send_to = order_unpacked[c.STRATEGY_CHAIN][-1]
                     self.frontend.send_multipart([send_to.encode('utf-8'), order_packed])
             except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
-                self.frontend.close(linger = 10)
-                self.backend.close(linger = 10)
+                self._stop()
             except:
                 raise
 
+
+    def _stop(self):
+        print('shutting down broker proxy!')
         # exit gracefully
         self.frontend.close(linger = 10)
         self.backend.close(linger = 10)
-    
-        return
-
-    def _stop(self):
-        self.shutdown_flag.set()
+        # self.capture.close(linger = 10)
 
 class zmq_communication_proxy:
     """Proxy to facilitate inter-strategy communication.
@@ -708,14 +700,13 @@ class zmq_communication_proxy:
         }
 
     """
-    def __init__(self, address, address_capture = None, context = None):
+    def __init__(self, address, address_capture, zmq_context):
         
         self.address = address
         # self.address_capture = address_capture
-        self.context = context or zmq.Context.instance()
-        self._shutdown_flag = threading.Event()
+        self.zmq_context = zmq_context
 
-        self.message_router = self.context.socket(zmq.ROUTER)
+        self.message_router = self.self.zmq_context.socket(zmq.ROUTER)
         self.message_router.bind(address)
 
         # TODO: implement capture socket
@@ -730,17 +721,13 @@ class zmq_communication_proxy:
         self.poller = zmq.Poller()
         self.poller.register(self.message_router, zmq.POLLIN)
     
-    def run(self, session_shutdown_flag = None):
-        self._start(session_shutdown_flag)
+    def run(self):
+        self._start()
         self._stop()
 
-    def _start(self, session_shutdown_flag= None):
+    def _start(self):
 
-        if session_shutdown_flag is None:
-            session_shutdown_flag = self._shutdown_flag
-            session_shutdown_flag.clear()
-
-        while (not session_shutdown_flag.is_set()) and (not self._shutdown_flag.is_set()):
+        while True:
             try:
                 socks = dict(self.poller.poll())
                 if socks.get(self.message_router) == zmq.POLLIN:
@@ -755,29 +742,23 @@ class zmq_communication_proxy:
                     self.message_router.send_multipart([receiver.encode('utf-8'), message_packed])
 
             except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
-                self.message_router.close(linger = 10)
+                self._stop
             except:
                 raise
 
-        # exit gracefully
-        self.message_router.close(linger = 10)
-
-        return
-
     def _stop(self):
-        self._shutdown_flag.set()
+        self.message_router.close(linger = 10)
 
 class zmq_logging_proxy:
     """Proxy to handle logging.
         Simply receives log records and have the session logger handle them.
     """
-    def __init__(self, address, context = None):
+    def __init__(self, address, zmq_context):
 
         self.address = address
-        self.context = context or zmq.Context.instance()
-        self._shutdown_flag = threading.Event()
+        self.zmq_context = zmq_context
 
-        self.socket = self.context.socket(zmq.SUB)
+        self.socket = self.zmq_context.socket(zmq.SUB)
         # no filtering here
         self.socket.setsockopt(zmq.SUBSCRIBE, b'')
         self.socket.bind(address)
@@ -785,17 +766,13 @@ class zmq_logging_proxy:
         self.poller = zmq.Poller()
         self.poller.register(self.socket, zmq.POLLIN)
     
-    def run(self, session_shutdown_flag = None):
-        self._start(session_shutdown_flag)
+    def run(self):
+        self._start()
         self._stop()
 
-    def _start(self, session_shutdown_flag= None):
+    def _start(self):
 
-        if session_shutdown_flag is None:
-            session_shutdown_flag = self._shutdown_flag
-            session_shutdown_flag.clear()
-
-        while (not session_shutdown_flag.is_set()) and (not self._shutdown_flag.is_set()):
+        while True:
             try:
                 socks = dict(self.poller.poll())
                 if socks.get(self.socket) == zmq.POLLIN:
@@ -804,26 +781,23 @@ class zmq_logging_proxy:
                     logrecord_unpacked = utils.unpackb(logrecord_packed)
                     logging.getLogger().handle(logrecord_unpacked)
             except (zmq.ContextTerminated, zmq.ZMQError): # Not sure why it's not getting caught by ContextTerminated
-                self.socket.close(linger = 10)
+                self._stop
             except:
                 raise
-
-        # exit gracefully
-        self.socket.close(linger = 10)
 
         return
 
     def _stop(self):
-        self._shutdown_flag.set()
+        self.socket.close(linger = 10)
 
 class DatafeedProxyEmulator:
     """Relays data events to each strategy's sockets, filtering topics."""
-    def __init__(self):
+    def __init__(self, session_shutdown_flag):
 
         self.sockets_publisher = {}     # datafeeds send data here
         self.sockets_subscriber = {}    # strategies get data here
         self.subscriptions = {}         # strategy subscriptions (}name: list of subscriptions})
-        self._shutdown_flag = threading.Event()
+        self.session_shutdown_flag = session_shutdown_flag
 
     def add_publisher(self, ident):
         self.sockets_publisher[ident] = SocketEmulator()
@@ -848,22 +822,18 @@ class DatafeedProxyEmulator:
                         self.sockets_subscriber[strategy].deq.append([topic_encoded, data_packed])
                 return True
     
-    def run(self, session_shutdown_flag = None):
-        self._start(session_shutdown_flag)
+    def run(self):
+        self._start()
         self._stop()
 
-    def _start(self, session_shutdown_flag = None, pause = 0.1):
+    def _start(self, pause = 0.1):
         
-        if session_shutdown_flag is None:
-            session_shutdown_flag = self._shutdown_flag
-            session_shutdown_flag.clear()
-        
-        while (not session_shutdown_flag.is_set()) and (not self._shutdown_flag.is_set()):
+        while not self.session_shutdown_flag.is_set():
             if not self.clear_queues():
                 time.sleep(pause)
     
     def _stop(self):
-        self._shutdown_flag.set()
+        pass
 
 class BrokerProxyEmulator:
     """Relays orders between strategies and brokers.
@@ -873,11 +843,11 @@ class BrokerProxyEmulator:
     Otherwise use the last item in the STRATEGY_CHAIN to identify the socket
         to send to.
     """
-    def __init__(self, default_broker = None):
+    def __init__(self, default_broker, session_shutdown_flag):
 
         self.sockets = {}
         self.default_broker = default_broker
-        self._shutdown_flag = threading.Event()
+        self.session_shutdown_flag = session_shutdown_flag
 
     def add_party(self, ident):
         self.sockets[ident] = SocketEmulator()
@@ -920,30 +890,26 @@ class BrokerProxyEmulator:
         return had_activities
 
     
-    def run(self, session_shutdown_flag = None):
-        self._start(session_shutdown_flag)
+    def run(self):
+        self._start()
         self._stop()
 
-    def _start(self, session_shutdown_flag = None, pause = 1):
-
-        if session_shutdown_flag is None:
-            session_shutdown_flag = self._shutdown_flag
-            session_shutdown_flag.clear()
+    def _start(self, pause = 1):
         
-        while (not session_shutdown_flag.is_set()) and (not self._shutdown_flag.is_set()):
+        while not self.session_shutdown_flag.is_set():
             if not self.clear_queues():
                 time.sleep(pause)
 
     def _stop(self):
-        self._shutdown_flag.set()
+        pass
 
 
 class CommunicationProxyEmulator:
     """Relays messages from one socket emulator to another using RECEIVER_ID."""
-    def __init__(self):
+    def __init__(self, session_shutdown_flag):
 
         self.sockets = {}
-        self._shutdown_flag = threading.Event()
+        self.session_shutdown_flag = session_shutdown_flag
 
     def add_party(self, ident):
         self.sockets[ident] = SocketEmulator()
@@ -981,26 +947,23 @@ class CommunicationProxyEmulator:
 
         return had_activities
     
-    def run(self, session_shutdown_flag = None):
-        self._start(session_shutdown_flag)
+    def run(self):
+        self._start()
         self._stop()
 
-    def _start(self, session_shutdown_flag = None, pause = 1):
-        if session_shutdown_flag is None:
-            session_shutdown_flag = self._shutdown_flag
-            session_shutdown_flag.clear()
-
-        while (not session_shutdown_flag.is_set()) and (not self._shutdown_flag.is_set()):
+    def _start(self,pause = 1):
+        
+        while not self.session_shutdown_flag.is_set():
             if not self.clear_queues():
                 time.sleep(pause)
 
     def _stop(self):
-        self._shutdown_flag.set()
+        pass
 
 class LoggingProxyEmulator:
     """Receives logging records."""
-    def __init__(self):
-        self._shutdown_flag = threading.Event()
+    def __init__(self, session_shutdown_flag):
+        self.session_shutdown_flag = session_shutdown_flag
         self.logging_socket = SocketEmulator()
     
     def clear_queues(self):
@@ -1015,22 +978,18 @@ class LoggingProxyEmulator:
             logging.getLogger().handle(logrecord_unpacked)
         return has_activities
 
-    def run(self, session_shutdown_flag = None):
-        self._start(session_shutdown_flag)
+    def run(self):
+        self._start()
         self._stop()
 
-    def _start(self, session_shutdown_flag = None, pause = 1):
-        
-        if session_shutdown_flag is None:
-            session_shutdown_flag = self._shutdown_flag
-            session_shutdown_flag.clear()
-        
-        while (not session_shutdown_flag.is_set()) and (not self._shutdown_flag.is_set()):
+    def _start(self, pause = 1):
+                
+        while not self.session_shutdown_flag.is_set():
             if not self.clear_queues():
                 time.sleep(pause)
     
     def _stop(self):
-        self._shutdown_flag.set()
+        pass
 
 class SocketEmulator:
     def __init__(self):

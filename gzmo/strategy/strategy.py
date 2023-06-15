@@ -198,7 +198,7 @@ class Strategy(event_handler.EventHandler):
         if not self.logging_socket:
             socket = self.zmq_context.socket(zmq.PUB)
             self.logging_socket = socket
-        self.logging_socket.conenct(logging_address)
+        self.logging_socket.connect(logging_address)
         self.logger.addHandler(utils.ZMQHandler(self.logging_socket))
 
     def subscribe_to_data(self, topic, track = True, line_args = None, lazy = False):
